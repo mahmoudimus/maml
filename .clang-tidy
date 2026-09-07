@@ -1,0 +1,112 @@
+# .clang-tidy - static analysis for maml
+#
+# Enabled with -DMAML_CLANG_TIDY=ON; off by default so ordinary builds are
+# not slowed by it.
+#
+# This file used to be static_asm's, carried over verbatim, and it disagreed
+# with this codebase on the most basic point: it declared types lower_case
+# while maml deliberately writes them PascalCase (Candidate, Image, Seed).
+# That one mismatch produced 383 of roughly 8,000 findings, and a config that
+# is wrong about the code it lints teaches everyone to ignore it. What follows
+# are the checks whose findings we intend to act on.
+#
+# Deliberately NOT enabled, with reasons:
+#   readability-braces-around-statements   683 hits; this codebase consistently
+#                                          omits braces on single statements
+#   bugprone-chained-comparison            396 hits, all Catch2: REQUIRE(a == b)
+#                                          expands to `v0 <= v1 == v2`
+#   cppcoreguidelines-pro-bounds-*         559 hits; this is a byte scanner,
+#                                          pointer arithmetic and unchecked
+#                                          indexing are the job, and every call
+#                                          site bounds them by hand
+#   modernize-use-designated-initializers  342 hits, purely stylistic
+#   google-readability-casting             maml.hpp and mamlscan.hpp are
+#                                          VENDORED downstream by copying;
+#                                          reformatting them hands that
+#                                          consumer a diff for no benefit
+#
+# Two naming outliers are left as they are, both in the vendored headers:
+# `overloaded`, which is the standard std::visit helper and is spelled that way
+# everywhere, and one `bestCount` that predates the snake_case convention.
+# Renaming either would hand the downstream consumer a diff to absorb.
+#
+---
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-exception-escape,
+  -bugprone-chained-comparison,
+  clang-analyzer-*,
+  performance-*,
+  -performance-enum-size,
+  misc-const-correctness,
+  misc-use-anonymous-namespace,
+  readability-identifier-naming,
+  readability-isolate-declaration,
+
+# A use-after-move or dangling handle in a header-only library is a bug in
+# every consumer at once, so these stop the build rather than warn.
+WarningsAsErrors: >
+  bugprone-use-after-move,
+  bugprone-dangling-handle,
+  clang-analyzer-*,
+
+# All of our own headers. third_party/catch2/catch.hpp alone accounts for
+# 2,792 findings and is not ours to change; everything under include/maml
+# is.
+#
+# maml.hpp and mamlscan.hpp are kept byte-identical by a downstream project
+# that copies them, so a fix here is a diff someone else absorbs. That is a
+# reason to batch and announce the change, not a reason to leave findings
+# unexamined -- CLAUDE.md is explicit that these are this project's own code
+# and should be changed directly rather than worked around.
+HeaderFilterRegex: 'include/maml/.*\.hpp$'
+
+CheckOptions:
+  # The conventions this codebase actually follows.
+  - key: readability-identifier-naming.NamespaceCase
+    value: lower_case
+  - key: readability-identifier-naming.ClassCase
+    value: CamelCase
+  - key: readability-identifier-naming.StructCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumCase
+    value: CamelCase
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.MemberCase
+    value: lower_case
+  # Private and protected members carry a trailing underscore: atoms_, bytes_.
+  - key: readability-identifier-naming.PrivateMemberSuffix
+    value: _
+  - key: readability-identifier-naming.ProtectedMemberSuffix
+    value: _
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  # Two different conventions, and clang-tidy distinguishes them:
+  #   scoped enums are PascalCase with NO prefix -- Strategy::Body,
+  #   TokenType::Word, ParseErrorType::UnexpectedToken;
+  #   unscoped enum constants used as compile-time values take the k prefix,
+  #   like the constexpr variables they stand in for -- kBucketCount, kXref.
+  # Demanding k everywhere flagged all 35 scoped constants in maml.hpp,
+  # which was the config being wrong about the code rather than a finding.
+  - key: readability-identifier-naming.ScopedEnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.EnumConstantPrefix
+    value: k
+  - key: readability-identifier-naming.ConstexprVariableCase
+    value: CamelCase
+  - key: readability-identifier-naming.ConstexprVariablePrefix
+    value: k
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: CamelCase
+  - key: readability-identifier-naming.GlobalConstantPrefix
+    value: k
+---

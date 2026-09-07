@@ -1,0 +1,98 @@
+name: Deploy
+
+# Publishes to PyPI via trusted publishing. The PyPI publisher is bound to THIS
+# filename. Configure a MAML-specific publisher before enabling the repository
+# variable MAML_ENABLE_PUBLISH=true. No existing publisher is assumed. The
+# upload step must live here -- moving it into a reusable workflow would change
+# the OIDC claim PyPI matches on and the upload would be rejected.
+#
+# The build itself is not duplicated here: it calls wheels.yml, so a release
+# ships artifacts produced by exactly the workflow that was already exercised
+# from a branch. A release must never be the first run of a build.
+#
+# Publishing needs an explicit act: either a v* tag, or a manual dispatch with
+# publish=true. A plain dispatch builds and verifies without uploading, which
+# is the safe way to rehearse.
+
+on:
+    push:
+        tags:
+            - "v*"
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Actually upload to PyPI"
+                required: false
+                default: false
+                type: boolean
+
+concurrency:
+    group: deploy-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
+permissions:
+    contents: read
+
+jobs:
+    build:
+        name: Build
+        uses: ./.github/workflows/wheels.yml
+
+    upload_to_pypi:
+        name: Upload to PyPI
+        needs: [build]
+        runs-on: ubuntu-24.04
+        # Never publishes from a fork, and never on a bare dispatch unless the
+        # operator asked for it.
+        if: >-
+            github.repository == 'mahmoudimus/maml' &&
+            vars.MAML_ENABLE_PUBLISH == 'true' &&
+            (
+              startsWith(github.ref, 'refs/tags/v') ||
+              (github.event_name == 'workflow_dispatch' && inputs.publish)
+            )
+        permissions:
+            # IMPORTANT: mandatory for trusted publishing.
+            id-token: write
+        steps:
+            - name: Download every built artifact
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: cibw-*
+                  path: dist
+                  merge-multiple: true
+
+            - name: Show what is about to be published
+              working-directory: dist
+              run: ls -shR
+
+            # A tag that disagrees with the packaged version publishes the
+            # wrong number under the right name, and PyPI has no undo -- a
+            # version string is burned permanently once uploaded. Cheaper to
+            # check here than to yank later.
+            - name: The tag must match the packaged version
+              if: startsWith(github.ref, 'refs/tags/v')
+              shell: bash
+              run: |
+                  tag="${GITHUB_REF_NAME#v}"
+                  shopt -s nullglob
+                  sdists=(dist/*.tar.gz)
+                  if [ "${#sdists[@]}" -ne 1 ]; then
+                    echo "::error::expected exactly one source distribution"
+                    exit 1
+                  fi
+                  built="${sdists[0]##*/}"
+                  built="${built#maml-}"
+                  built="${built%.tar.gz}"
+                  echo "tag=$tag packaged=$built"
+                  if [ "$tag" != "$built" ]; then
+                    echo "::error::tag v$tag does not match packaged version $built"
+                    exit 1
+                  fi
+
+            - uses: pypa/gh-action-pypi-publish@release/v1
+              with:
+                  # Re-running a release must not fail on files PyPI already
+                  # has; it must not overwrite them either, and PyPI does not
+                  # allow that in any case.
+                  skip-existing: true

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77.0.1", "wheel", "cython>=3.1.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maml"
+version = "0.1.0"
+description = "Byte-pattern matching for binaries, with a seed-then-refine scanner"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSL-1.0 OR MIT"
+
+[project.optional-dependencies]
+pe = ["lief>=0.14"]
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.setuptools.package-data]
+maml = ["py.typed"]
+
+[tool.pytest.ini_options]
+# Dev convenience only, not an importability fix: lets a plain `pytest` run
+# (no prior install) find the package while iterating on the .pyx, by putting
+# python/ on sys.path directly. It does not exercise packages.find,
+# package-data, or the build-system table, so it proves nothing about whether
+# the tree is actually pip-installable -- `uv pip install -e .` is what
+# proves that, and is required for the version cross-check test below.
+pythonpath = ["python"]

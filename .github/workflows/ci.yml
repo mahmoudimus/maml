@@ -1,0 +1,182 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, 'diff/**' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.os }} / ${{ matrix.build_type }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both vector backends are exercised on native hardware, no
+        # emulation: macos-latest and ubuntu-24.04-arm are arm64 (NEON),
+        # ubuntu-latest and windows-latest are x86_64 (SSE2). The arm64 Linux
+        # leg is not redundant with macOS -- it is the only one that compiles
+        # the NEON path with GCC rather than Apple clang.
+        #
+        # tests/test_simd_backend.cpp turns that coverage into an assertion:
+        # mamlscan.hpp keeps a correct memchr fallback, so a target where the
+        # preprocessor selects no vector path stays green while silently
+        # losing ~1.9x. Running on more machines proves nothing on its own.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        build_type: [Debug, Release]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Configure
+      run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }}
+
+    - name: Test
+      run: ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure
+
+    # Release only: Debug numbers would say more about the optimiser than the
+    # ISA. Every throughput figure this project quotes was measured on
+    # arm64/NEON -- the SSE2 path was only ever proven to compile and be
+    # selected -- so this is the first native x86 measurement of it, and the
+    # memchr column is what makes the number a ratio rather than trivia.
+    - name: Scan throughput
+      if: matrix.build_type == 'Release'
+      shell: bash
+      run: |
+        bin="build/mamlbench"
+        [ -x "$bin" ] || bin="build/Release/mamlbench.exe"
+        "$bin" 128 5
+
+    # ctest hides a passing test's output, and which backend compiled in is
+    # exactly the thing worth reading on a green run.
+    - name: Report the SIMD backend
+      shell: bash
+      run: |
+        bin="build/maml_tests"
+        [ -x "$bin" ] || bin="build/${{ matrix.build_type }}/maml_tests.exe"
+        "$bin" "[simd]" --success 2>&1 | grep -i "SIMD backend" || {
+          echo "::error::could not read the compiled SIMD backend"
+          exit 1
+        }
+
+  sanitizers:
+    # ASan + UBSan. Some properties cannot be expressed as an assertion: a
+    # Session holding a dangling reference to a temporary Image passed its own
+    # test, because reading freed stack memory is UB that happened to work.
+    # Under ASan it is "stack-use-after-scope" and the job fails. The Cython
+    # bindings hand C++ spans over Python-owned storage, which is the same
+    # class of thing.
+    name: Sanitizers
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build with ASan and UBSan
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+        cmake --build build -j
+    - name: Run
+      env:
+        ASAN_OPTIONS: detect_stack_use_after_return=1
+        UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+      run: ./build/maml_tests
+
+  python:
+    # The Python suite against a tree that also has mamlscan built.
+    #
+    # wheels.yml runs this suite against every built wheel, which is the right
+    # place for it -- but cibuildwheel's test environment has no CMake build,
+    # so test_differential.py (8 tests: "the bindings must agree with the
+    # mamlscan CLI, which is the verified path") skipped on every platform. It
+    # was the most valuable Python test and the only one that never ran.
+    name: Python ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    # mamlscan is what test_differential compares the bindings against.
+    - name: Build mamlscan
+      run: |
+        cmake -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release
+
+    # The [pe] extra pulls lief, which test_containers needs. Without it those
+    # 3 tests skip -- and "1 skipped" in a green run is how the differential
+    # suite stayed dark for months. lief ships wheels for all three runners.
+    - name: Install the extension and pytest
+      run: python -m pip install --disable-pip-version-check ".[pe]" pytest
+
+    # `-o pythonpath=` overrides pyproject's dev convenience, which would
+    # otherwise put python/ on sys.path and test the source tree instead of
+    # what was just installed.
+    # --strict: no test may skip here. Every dependency this suite needs is
+    # installed above, so a skip means something silently stopped running --
+    # which is the exact failure this job was added to catch.
+    - name: Run the suite, with nothing allowed to skip
+      shell: bash
+      run: |
+        out=$(python -m pytest tests/python -q -o pythonpath= 2>&1)
+        echo "$out"
+        case "$out" in
+          *skipped*) echo "::error::a test skipped; every dependency is installed, so nothing should"; exit 1 ;;
+        esac
+
+    # The differential tests skipped silently on every platform for months
+    # because they could not find mamlscan. A green suite that quietly ran 8
+    # fewer tests is the failure this guard exists to make impossible.
+    - name: The differential suite must actually run
+      shell: bash
+      run: |
+        out=$(python -m pytest tests/python/test_differential.py -q -o pythonpath= 2>&1)
+        echo "$out"
+        case "$out" in
+          *skipped*) echo "::error::test_differential skipped; it must run here"; exit 1 ;;
+        esac
+        case "$out" in
+          *"8 passed"*) ;;
+          *) echo "::error::expected 8 differential tests, got: $out"; exit 1 ;;
+        esac
+
+  consume:
+    name: Consumable via add_subdirectory
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build a consumer that only links the interface target
+      run: |
+        mkdir -p /tmp/consumer
+        cp -r . /tmp/consumer/maml
+        cat > /tmp/consumer/CMakeLists.txt <<'EOC'
+        cmake_minimum_required(VERSION 3.19)
+        project(consumer LANGUAGES CXX)
+        add_subdirectory(maml)
+        add_executable(consumer main.cpp)
+        target_link_libraries(consumer PRIVATE maml::maml)
+        EOC
+        cat > /tmp/consumer/main.cpp <<'EOC'
+        #include <maml.hpp>
+        #include <array>
+        int main() {
+            std::array<unsigned char, 4> img{0x4C, 0x8B, 0xD0, 0x90};
+            auto hit = maml::locate::find(
+                std::span<const unsigned char>(img.data(), img.size()),
+                "4C 8B D0");
+            return hit ? 0 : 1;
+        }
+        EOC
+        cmake -S /tmp/consumer -B /tmp/consumer/build
+        cmake --build /tmp/consumer/build
+        /tmp/consumer/build/consumer

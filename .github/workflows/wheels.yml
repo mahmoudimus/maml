@@ -1,0 +1,228 @@
+name: Build wheels
+
+# Builds and verifies wheels on every platform maml is meant to run on.
+# Publishes nothing.
+#
+# Separate from deploy.yml on purpose: a release must never be the first time
+# this build has executed. The Cython extension has only ever been compiled on
+# an arm64 Mac -- setup.py's MSVC branch (/std:c++20 /EHsc) has never run, and
+# neither has any Linux build. Run this from a branch first and read the
+# artifacts.
+#
+# The SIMD backend is asserted per platform rather than assumed. mamlscan.hpp
+# falls back to a correct memchr scan when the preprocessor selects no vector
+# path, so a wheel that lost SIMD passes every functional test and merely runs
+# ~1.9x slower. Only tools/verify_wheel.py --expect-simd catches that, which is
+# the whole reason the extension exposes simd_backend().
+
+on:
+    # Called by deploy.yml, so a release ships artifacts built by the same
+    # workflow that was already exercised from a branch.
+    workflow_call:
+    workflow_dispatch:
+        inputs:
+            platforms:
+                description: "Which platforms to build"
+                required: false
+                default: "all"
+                type: choice
+                options: ["all", "linux", "macos", "windows"]
+    pull_request:
+        types: [synchronize, opened, reopened, ready_for_review]
+        paths:
+            - "python/**"
+            - "include/**"
+            - "setup.py"
+            - "pyproject.toml"
+            - "tools/verify_wheel.py"
+            - ".github/workflows/wheels.yml"
+
+# Prefixed rather than keyed on github.workflow alone: in a called workflow
+# that expression resolves to the CALLER's name, so on a release this would
+# compute the same concurrency group as deploy.yml -- the caller holding the
+# group while waiting for the callee queued behind it.
+concurrency:
+    group: wheels-${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+
+jobs:
+    build_wheels:
+        name: ${{ matrix.name }}
+        runs-on: ${{ matrix.runs-on }}
+        # Nothing here legitimately takes this long, and the default is six
+        # hours; a hang would burn a full day of Windows minutes before anyone
+        # noticed.
+        timeout-minutes: 45
+        strategy:
+            # One platform failing must not hide the others: finding out which
+            # platforms work is the entire point of this workflow.
+            fail-fast: false
+            # Every leg is spelled out in `include` with NO base matrix keys
+            # alongside it. An `include` entry whose keys do not collide with a
+            # base key is merged INTO each existing combination rather than
+            # adding a job -- which silently collapses five platforms into one.
+            matrix:
+                include:
+                    - name: linux-x86_64
+                      runs-on: ubuntu-24.04
+                      family: linux
+                      archs: x86_64
+                      simd: sse2
+                    - name: linux-aarch64
+                      runs-on: ubuntu-24.04-arm
+                      family: linux
+                      archs: aarch64
+                      simd: neon
+                    - name: macos-arm64
+                      runs-on: macos-15
+                      family: macos
+                      archs: arm64
+                      simd: neon
+                    - name: macos-x86_64
+                      runs-on: macos-15-intel
+                      family: macos
+                      archs: x86_64
+                      simd: sse2
+                    - name: windows-x86_64
+                      runs-on: windows-2025
+                      family: windows
+                      archs: AMD64
+                      simd: sse2
+        steps:
+            - name: Skip unselected platform
+              id: gate
+              shell: bash
+              run: |
+                  want="${{ inputs.platforms || 'all' }}"
+                  if [ "$want" = "all" ] || [ "$want" = "${{ matrix.family }}" ]; then
+                    echo "run=yes" >> "$GITHUB_OUTPUT"
+                  else
+                    echo "run=no" >> "$GITHUB_OUTPUT"
+                    echo "skipping ${{ matrix.name }} (requested: $want)"
+                  fi
+
+            - uses: actions/checkout@v4
+              if: steps.gate.outputs.run == 'yes'
+              with:
+                  persist-credentials: false
+
+            - name: Build and verify wheels
+              if: steps.gate.outputs.run == 'yes'
+              uses: pypa/cibuildwheel@v3.1
+              env:
+                  CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-*"
+                  # win32 has no 64-bit target, so mamlscan.hpp's SSE2 branch is
+                  # correctly not selected there and the wheel would ship the
+                  # scalar fallback. musllinux would need its own toolchain
+                  # story for no current consumer.
+                  CIBW_SKIP: "*-win32 *-musllinux_*"
+                  CIBW_ARCHS: ${{ matrix.archs }}
+                  # No CIBW_BEFORE_BUILD: pyproject's build-system.requires
+                  # already pins cython>=3.1.3, and build isolation installs
+                  # it. The explicit step was not just redundant, it was
+                  # broken -- cmd.exe takes single quotes literally, so
+                  # Windows tried to install a package called "'Cython".
+                  # The expectation travels as an ARGUMENT, not an environment
+                  # variable: the Linux legs build inside a container, and an
+                  # env var that fails to cross that boundary would turn this
+                  # into a no-op that still prints "wheel OK".
+                  CIBW_TEST_REQUIRES: pytest
+                  # Two things, and the order matters: verify_wheel.py first,
+                  # because it refuses to run at all unless the import came
+                  # from site-packages, so it establishes that what follows is
+                  # testing the WHEEL.
+                  #
+                  # `-o pythonpath=` is load-bearing, not tidiness. pyproject
+                  # sets `pythonpath = ["python"]` as a dev convenience, and
+                  # pytest resolves it against the rootdir it discovers -- the
+                  # source tree. Without the override the whole suite imports
+                  # python/maml and passes on every platform while proving
+                  # nothing about the artifact. Verified by asserting
+                  # maml.__file__: without it the module comes from the
+                  # source tree, with it from site-packages.
+                  CIBW_TEST_COMMAND: >-
+                      python {project}/tools/verify_wheel.py
+                      --expect-simd ${{ matrix.simd }}
+                      && python -m pytest {project}/tests/python
+                      -q -o pythonpath=
+              with:
+                  package-dir: .
+                  output-dir: wheelhouse
+
+            # A wheel carrying two extension modules is not obviously broken:
+            # pip installs it and CPython silently prefers one, so the module
+            # that loads is whichever stale artefact was lying in the source
+            # tree or in setuptools' build/lib staging directory. A count is
+            # the whole check.
+            - name: Each wheel must ship exactly one extension
+              if: steps.gate.outputs.run == 'yes'
+              shell: bash
+              run: |
+                  # `python` does not exist on the macOS runners -- only
+                  # python3 -- and this step is outside cibuildwheel's managed
+                  # environment, so it gets whatever the image provides.
+                  PY=python3; command -v "$PY" >/dev/null 2>&1 || PY=python
+                  "$PY" - wheelhouse/*.whl <<'CHECK'
+                  import sys, zipfile
+                  failed = False
+                  for path in sys.argv[1:]:
+                      names = zipfile.ZipFile(path).namelist()
+                      found = [n for n in names if n.endswith((".so", ".pyd", ".dylib"))]
+                      print(f"{path}:")
+                      for name in found:
+                          print(f"    {name}")
+                      if len(found) != 1:
+                          print(f"::error::{path} ships {len(found)} extensions; "
+                                "exactly one is expected")
+                          failed = True
+                  sys.exit(1 if failed else 0)
+                  CHECK
+
+            - name: Upload
+              if: steps.gate.outputs.run == 'yes'
+              uses: actions/upload-artifact@v4
+              with:
+                  name: cibw-wheels-${{ matrix.name }}
+                  path: wheelhouse/*.whl
+                  if-no-files-found: error
+
+    build_sdist:
+        name: sdist
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v4
+              with:
+                  persist-credentials: false
+
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: "3.13"
+
+            - name: Build sdist
+              run: pipx run build --sdist
+
+            # An sdist that omits include/ or third_party/ still builds a valid
+            # archive and fails only when someone tries to install it, which on
+            # PyPI means after publication. Building the wheel FROM the sdist
+            # is what proves the archive is self-contained.
+            - name: The sdist must build a working wheel on its own
+              run: |
+                  python -m venv /tmp/sd
+                  /tmp/sd/bin/python -m pip install --disable-pip-version-check -q \
+                      dist/*.tar.gz
+                  cd /tmp
+                  /tmp/sd/bin/python "$GITHUB_WORKSPACE/tools/verify_wheel.py" \
+                      --expect-simd sse2
+                  /tmp/sd/bin/python -m pip install --disable-pip-version-check -q pytest
+                  /tmp/sd/bin/python -m pytest "$GITHUB_WORKSPACE/tests/python" \
+                      -q -o pythonpath=
+
+            - uses: actions/upload-artifact@v4
+              with:
+                  name: cibw-sdist
+                  path: dist/*.tar.gz
+                  if-no-files-found: error

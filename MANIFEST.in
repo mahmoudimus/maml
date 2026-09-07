@@ -1,0 +1,16 @@
+# Keep the source distribution independently buildable for C++ and Python.
+include LICENSE README.md
+include CMakeLists.txt .clang-format .clang-tidy
+recursive-include cmake *.in
+recursive-include tests *.cpp *.py
+recursive-include third_party *.hpp
+recursive-include tools *.cpp *.py *.md
+include docs/build-validation.md
+recursive-include conformance *.md *.json
+
+# Cython sources, type marker, and the header-only C++ library.
+recursive-include python/maml *.pyx *.pxd py.typed
+recursive-include include *.hpp
+
+# Git ignore rules do not control setuptools distribution contents.
+prune _gitless

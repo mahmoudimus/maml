@@ -1,0 +1,24 @@
+# Test-only relaxations, inheriting the root config.
+#
+# Tests are not a library. A fixture vector at namespace scope cannot strand a
+# consumer; a push_back loop over a dozen elements is not a performance
+# question; and `REQUIRE(hit->offset == X)` on an optional fails the test
+# loudly if it is empty, which is the assertion doing its job rather than a
+# defect. Leaving these on produced ~180 findings in this directory alone,
+# which is how a linter becomes wallpaper.
+#
+# NOTE: every entry below must stay inside the folded scalar with no inline
+# `#` comments -- a `#` inside `Checks: >` is literal text, not a comment, and
+# silently corrupts the check list. That is why these notes live up here.
+---
+InheritParentConfig: true
+Checks: >
+  -bugprone-throwing-static-initialization,
+  -bugprone-unchecked-optional-access,
+  -bugprone-implicit-widening-of-multiplication-result,
+  -bugprone-narrowing-conversions,
+  -performance-inefficient-vector-operation,
+  -misc-use-anonymous-namespace,
+  -misc-const-correctness,
+  -readability-identifier-naming,
+  -readability-isolate-declaration,
