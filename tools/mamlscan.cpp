@@ -13,6 +13,7 @@
 // Output per job, TAB separated
 //     name <TAB> OK|MISS|MULTI|NONE|ERR <TAB> hits <TAB> rva[,rva...] <TAB> detail
 #include "maml/mamlscan.hpp"
+#include "maml/v1.hpp"
 #include "maml/maml.hpp"
 #include <cstdio>
 #include <cstring>
@@ -199,9 +200,81 @@ int run_scan(const char* image, const char* jobfile) {
     return 0;
 }
 
+// Explicit dialect selection keeps identical byte spellings unambiguous.
+int run_v1(const std::vector<std::string>& args) {
+    if (args.size() < 2) {
+        fprintf(stderr, "usage: mamlscan --dialect maml-v1 <image> <pattern> [--capture NAME] [--limit N] [--expect HEX]\n");
+        return 2;
+    }
+    try {
+        std::string capture;
+        uint64_t limit = 32, expected = 0;
+        bool have_expect = false;
+        for (size_t i = 2; i < args.size(); i += 2) {
+            if (i + 1 == args.size())
+                throw std::runtime_error("Option requires an argument");
+            if (args[i] == "--capture") {
+                capture = args[i + 1];
+                continue;
+            }
+            if (args[i] != "--limit" && args[i] != "--expect")
+                throw std::runtime_error("Unknown v1 option: " + args[i]);
+            const auto& text = args[i + 1];
+            uint64_t number = 0;
+            auto r = std::from_chars(text.data(), text.data() + text.size(), number, args[i] == "--expect" ? 16 : 10);
+            if (r.ec != std::errc{} || r.ptr != text.data() + text.size())
+                throw std::runtime_error("Invalid numeric argument");
+            if (args[i] == "--limit")
+                limit = number;
+            else {
+                expected = number;
+                have_expect = true;
+            }
+        }
+        if (!limit || limit >= SIZE_MAX)
+            throw std::runtime_error("limit must be positive and below SIZE_MAX");
+        const v1::Pattern pattern(args[1]);
+        if (!capture.empty())
+            (void)v1::Match{ 0, pattern.schema(), {} }.capture(capture);
+        auto data = load(args[0]);
+        if (data.empty())
+            throw std::runtime_error("Cannot read nonempty image: " + args[0]);
+        Scan result;
+        for (const auto& hit : pattern.find_all(v1::Image{ data }, capture.empty() ? size_t(limit) + 1 : 0)) {
+            if (capture.empty())
+                result.rvas.push_back(hit.offset);
+            else if (auto v = hit.capture(capture))
+                result.rvas.push_back(v->value);
+            if (result.rvas.size() > limit)
+                break;
+        }
+        classify(result, have_expect, expected);
+        printf("%s hits=%zu %s\n", result.status.c_str(), result.rvas.size(), join(result.rvas, size_t(limit)).c_str());
+        return result.status == "OK" ? 0 : 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "ERR %s\n", e.what());
+        return 1;
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    std::vector<std::string> semantic_args;
+    bool semantic = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--dialect") == 0) {
+            if (semantic || i + 1 == argc || strcmp(argv[++i], "maml-v1") != 0) {
+                fprintf(stderr, "Expected exactly one --dialect maml-v1\n");
+                return 2;
+            }
+            semantic = true;
+        } else
+            semantic_args.emplace_back(argv[i]);
+    }
+    if (semantic)
+        return run_v1(semantic_args);
+
     if (argc >= 4 && strcmp(argv[1], "--scan") == 0)
         return run_scan(argv[2], argv[3]);
     if (argc >= 3 && strcmp(argv[1], "--batch") == 0)
@@ -209,7 +282,8 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         fprintf(stderr,
             "usage: mamlscan <image> <pattern> [--limit N] [--expect RVA] [--save-index K]\n"
-            "       mamlscan --batch <jobfile>\n");
+            "       mamlscan --batch <jobfile>\n"
+            "       mamlscan --dialect maml-v1 <image> <pattern> [--capture NAME] [--limit N] [--expect HEX]\n");
         return 2;
     }
     const std::string path = argv[1];

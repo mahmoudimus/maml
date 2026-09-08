@@ -134,6 +134,9 @@ jobs:
           *skipped*) echo "::error::a test skipped; every dependency is installed, so nothing should"; exit 1 ;;
         esac
 
+    - name: MAML v1 language conformance
+      run: python tools/check_conformance.py --adapter python -m maml.v1_adapter
+
     # The differential tests skipped silently on every platform for months
     # because they could not find mamlscan. A green suite that quietly ran 8
     # fewer tests is the failure this guard exists to make impossible.

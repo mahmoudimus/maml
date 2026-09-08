@@ -97,6 +97,7 @@ if(MAML_BUILD_TESTS)
         tests/test_generate.cpp
         tests/test_pipeline.cpp
         tests/test_simd_backend.cpp
+        tests/test_v1.cpp
         tests/test_sigils.cpp
     )
     target_link_libraries(maml_tests PRIVATE maml catch2_vendored)

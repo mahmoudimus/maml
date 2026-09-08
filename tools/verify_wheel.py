@@ -72,6 +72,13 @@ def main(argv=None) -> int:
         return fail(f"scan returned {hit!r}; expected a hit at offset 64")
     print(f"  scan:         hit at offset {hit.offset}")
 
+    from maml import v1
+    semantic = v1.Image(bytes.fromhex("E8 01 00 00 00 90 CC"))
+    result = v1.Pipeline('bytes("E8 rel32(x):follow CC") -> capture("x") -> unique').run(semantic)
+    if result.values != (v1.CaptureValue(6, "ResolvedRelativeTarget", "image"),):
+        return fail("semantic pipeline did not resolve its named capture")
+    print("  maml-v1:      named capture and pipeline passed")
+
     print("wheel OK")
     return 0
 

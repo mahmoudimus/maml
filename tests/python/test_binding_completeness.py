@@ -233,6 +233,7 @@ def test_every_candidate_field_is_populated(gen_img):
     are the same one", the precise opposite of what the field is for.
     """
     cands = generate.candidates(gen_img, 0x180, generate.Options(want=8))
+    cands += generate.candidates(gen_img, 0x180, generate.Options(want=8, dialect="maml-v1"))
     assert cands, "fixture produced no candidates; the test proves nothing"
 
     seen = {f: False for f in py_fields(generate.Candidate)}

@@ -170,7 +170,7 @@ def test_resolve_consensus_groups_and_orders_by_agreement():
     img = maml.Image.from_bytes(bytes(buf))
 
     def mk(at, delta):
-        return generate.Candidate(
+        return generate.Candidate(dialect="maml-current", target_capture="",
             pattern=_hex(buf[at:at + 6]), save_index=0, anchor_delta=delta,
             anchor_site=at, strategy=generate.Strategy.Body, literals=6,
             seed=None)
@@ -192,7 +192,7 @@ def test_resolve_consensus_drops_anchors_not_unique_in_the_new_image():
     buf[0x400:0x406] = run  # the SAME bytes twice: not unique
     img = maml.Image.from_bytes(bytes(buf))
 
-    amb = generate.Candidate(pattern=_hex(run), save_index=0, anchor_delta=0,
+    amb = generate.Candidate(dialect="maml-current", target_capture="", pattern=_hex(run), save_index=0, anchor_delta=0,
                               anchor_site=0x100, strategy=generate.Strategy.Body,
                               literals=6, seed=None)
     assert generate.resolve_consensus(img, [amb]) == []

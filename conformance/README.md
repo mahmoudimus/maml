@@ -6,10 +6,10 @@ on a particular matcher, language, object layout, exception class, or build
 system. Rust, C++, Python, JavaScript, and other implementations can consume the
 same file or expose the adapter protocol below.
 
-**Status:** 60 vectors are supplied. The fixture format and runner are tested;
-no v1 language implementation has been certified by this repository. The
-current engine does not implement the new syntax. A runner test that returns
-known answers tests the transport only, not the language.
+**Status:** all 60 supplied vectors pass against the C++ semantic frontend
+through its Cython bindings and the `maml.v1_adapter` JSONL adapter. This checks
+the listed contracts, not complete language coverage or performance. The
+unversioned parser remains a separate dialect.
 
 ## Run
 
@@ -17,6 +17,7 @@ Only Python's standard library is required for the runner:
 
 ```sh
 python tools/check_conformance.py
+python tools/check_conformance.py --adapter python -m maml.v1_adapter
 python tools/check_conformance.py --timeout 30 --adapter /path/to/maml-adapter
 python tools/check_conformance.py --adapter python /path/to/adapter.py
 ```

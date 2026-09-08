@@ -5,10 +5,10 @@ matching language.
 Patterns describe bytes, gaps, captures, and references. Pipelines transform
 matches and address sets. Cursor-machine mechanics stay below compilation.
 
-**Status:** the C++ engine, generator, Cython bindings, and Python APIs are
-available. The agreed MAML v1 semantic contracts are frozen;
-the introductory examples describe the new dialect, which is not implemented
-yet. The current runtime syntax and runnable examples are documented separately.
+**Status:** the semantic v1 frontend is implemented in C++ and exposed through
+Cython, Python, and the scanner/pipeline CLIs. Select it explicitly with
+`maml::v1`, `maml.v1`, or `--dialect maml-v1`. Existing unversioned APIs and
+commands keep their current grammar; there is no automatic syntax detection.
 
 ```text
 E8 rel32(callee) [3..5] 4C 8B D0 48 85 C0 74 ??
@@ -33,26 +33,269 @@ str("GetActivePlayerObj")
 ```
 
 See [build validation](docs/build-validation.md) for the current verification
-results. Passing the current tests does not establish v1 conformance.
+results. The implementation passes all 60 supplied v1 conformance vectors;
+those finite cases do not establish complete language coverage.
 
 The language remains byte-oriented. Instruction-aware constructs such as
 `call(callee)` and `mov(...)` are outside v1.
 
 ## Contents
 
+- [Using MAML v1](#using-maml-v1)
 - [Current pattern language](#current-runtime-language)
 - [Current locator pipelines](#current-locator-pipelines)
 - [Scanning APIs and CLI](#current-scanning-apis-and-mamlscan)
+- [Semantic generation and nibble masks](#semantic-generation-and-nibble-masks)
 - [Pattern generation and resolution](#generating-and-resolving-patterns)
 - [Normative v1 semantics](#maml-v1-semantics)
 - [Build and run](#build-and-run)
 - [Project layout and validation](#project-layout-and-validation)
 
+## Using MAML v1
+
+Python selects the dialect by importing `maml.v1`. Both patterns and pipelines
+compile on construction; unknown capture projections fail before any image is
+searched. Matching and pipeline execution run in C++ with the GIL released.
+
+```python
+from maml import v1
+
+image = v1.Image(bytes.fromhex("E8 01 00 00 00 90 CC"))
+hit = v1.Pattern("E8 rel32(callee) 90").find(image)
+assert hit.offset == 0
+assert hit.capture("callee").value == 6
+
+result = v1.Pipeline(
+    'bytes("E8 rel32(callee):follow CC") -> capture("callee") -> unique'
+).run(image)
+assert result.ok and result.values[0].value == 6
+```
+
+`Pattern.schema` is the union of declared names. `match_at(image, offset)` tests
+exactly that buffer offset; `find(image)` returns the first match;
+`find_all(image, limit=0)` returns all matches. `exhaustive=True` disables seed
+selection for differential checks. A match contains its buffer offset and an
+immutable dictionary of present captures. `capture(name)` returns a
+`CaptureValue(value, kind, space)` or `None` for a declared absent capture;
+unknown names raise `SchemaError`.
+
+`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), funcs=())` takes an
+immutable byte snapshot. Ranges are half-open buffer offsets, supplied as
+`(begin, end)` pairs or `maml.Range` objects. Captured cursor and relative
+addresses include `base`; match offsets do not. `pointer_map` explicitly maps
+absolute pointer values to logical image addresses. `from_file()` reads a flat
+image; `from_pe()` supplies flattened bytes and metadata using the optional PE
+loader. Supply `base=` explicitly when a virtual-address model is needed.
+
+C++ uses the same compiled program:
+
+```cpp
+#include <maml/v1_pipeline.hpp>
+#include <array>
+
+int main() {
+    const std::array<uint8_t, 7> bytes{0xE8, 1, 0, 0, 0, 0x90, 0xCC};
+    const maml::v1::Image image{bytes};
+    const maml::v1::Pattern pattern("E8 rel32(callee):follow CC");
+    const auto hit = pattern.find(image);
+    return hit && hit->capture("callee")->value == 6 ? 0 : 1;
+}
+```
+
+C++ images borrow their backing bytes. `Image::pointer_map` maps absolute values
+to logical addresses. `Pattern::match_at`, `find`, and `find_all` mirror the
+Python operations. `Pipeline::run(image, code, rodata, funcs)` accepts spans of
+`maml::generate::Range` for metadata. Keep backing bytes and ranges alive and
+unchanged during calls. Compiled patterns and pipelines are immutable and can
+be shared between threads.
+
+### V1 pipeline stages
+
+| Stage | Result |
+| --- | --- |
+| `str("text")` | Exact indexed string addresses; requires rodata |
+| `bytes("pattern")` | Match records across the image |
+| `find("pattern")` | Match records starting within enclosing functions; requires function ranges |
+| `capture("name")` | Present named values, deduplicated by value, kind, and space |
+| `xrefs` | Indexed reference sites; requires code and target classification |
+| `func` | Enclosing function entries; requires function ranges |
+| `func:loose` | Explicit alias for `func` |
+| `func:strict` | Requires every input to already be a known function entry |
+| `callers` | Direct call sites; requires code |
+| `unique` | Exactly one current record or value; otherwise an error |
+| `nth(N)` | Zero-based selection; out-of-range yields no results |
+| `limit(N)` | First N results |
+| `read(N)` | Little-endian scalars of width 1, 2, 4, or 8 |
+
+`func:strict` checks every input before mapping or deduplication. An interior
+address fails even when its function entry is also present in the input;
+an address outside all known functions fails too. The failure raises
+`ExecutionError` with code `NotFunctionEntry`. Empty input remains empty, but
+missing function metadata is still an error. `func:loose` retains plain `func`'s
+behavior of mapping interiors and dropping uncovered addresses. Modifiers must
+attach without whitespace around `:`. Unknown, repeated, or misplaced pipeline
+modifiers are compile errors, and successful traces retain the modifier name.
+
+A pipeline starts with exactly one `str` or `bytes` source. `bytes` and `find`
+produce records regardless of whether their patterns declare captures. Address
+transforms use record offsets; `capture` explicitly selects a named value.
+`nth`, `limit`, and `unique` preserve the current type and capture schema.
+Unlike the unversioned pipeline, `read` may be followed by selectors such as
+`unique`; its output has kind `ReadValue` and space `scalar`. Scalars and absolute
+pointer captures cannot feed address transforms without explicit conversion.
+
+String indexing and xref discovery use the same byte-analysis helpers as the
+[current pipeline](#current-locator-pipelines), including the six-byte printable
+ASCII string minimum. `find` searches each eligible start once, using the whole
+image as its address space so that an explicit `:follow` can leave the function.
+The function range constrains start positions, not the reference destination or
+final cursor. Metadata ranges do not constitute disassembler proof.
+
+Results have `kind` (`matches` or `values`), `schema`, `matches`, `values`, and a
+`trace` of stage/input/output counts. `ok` means a nonempty result. Ordinary
+misses return empty results; malformed input raises `CompileError`, unknown
+captures raise `SchemaError`, and failed `unique` raises `CardinalityError`.
+Missing metadata and resource exhaustion raise `ExecutionError`. Compiler
+errors carry a `code` and native parser `position`. C++ reports `maml::v1::Error`
+with the same code and position.
+
+### Multiline pipelines and declarative builders
+
+The pipeline separator `->` is exactly two ASCII characters: hyphen-minus (`-`)
+followed immediately by greater-than (`>`). A Unicode arrow is not accepted.
+Newlines and indentation are whitespace outside quoted arguments; `->` is still
+required between stages. A newline alone does not connect stages.
+
+Python uses a triple-quoted string to preserve the newlines:
+
+```python
+from maml import v1
+
+query = v1.Pipeline("""
+    str("GetActivePlayerObj")
+        -> xrefs
+        -> func:loose
+        -> find("E8 rel32(init) [3..5] 48 85 C0")
+        -> capture("init")
+        -> unique
+""")
+# result = query.run(image)  # image supplies code, rodata, and function ranges
+```
+
+C++ uses a raw string literal; the custom `pipeline` delimiter allows the
+quoted function arguments to appear unchanged:
+
+```cpp
+#include <maml/v1_pipeline.hpp>
+
+const auto query = maml::v1::Pipeline(R"pipeline(
+    str("GetActivePlayerObj")
+        -> xrefs
+        -> func:loose
+        -> find("E8 rel32(init) [3..5] 48 85 C0")
+        -> capture("init")
+        -> unique
+)pipeline");
+// auto result = query.run(image, code, rodata, funcs);
+```
+
+The equivalent Python builder avoids textual separators:
+
+```python
+from maml import v1
+
+query = (
+    v1.PipelineBuilder()
+    .str("GetActivePlayerObj")
+    .xrefs()
+    .func(strict=False)
+    .find("E8 rel32(init) [3..5] 48 85 C0")
+    .capture("init")
+    .unique()
+    .build()
+)
+# result = query.run(image)  # image supplies code, rodata, and function ranges
+```
+
+The equivalent C++ builder:
+
+```cpp
+#include <maml/v1_pipeline.hpp>
+
+const auto query = maml::v1::PipelineBuilder()
+    .str("GetActivePlayerObj")
+    .xrefs()
+    .func(maml::v1::FunctionMode::Loose)
+    .find("E8 rel32(init) [3..5] 48 85 C0")
+    .capture("init")
+    .unique()
+    .build();
+// auto result = query.run(image, code, rodata, funcs);
+```
+
+Both builders also expose `bytes`, `callers`, `nth`, `limit`, and `read`.
+Python `.func()` selects plain `func`, `strict=True` selects `func:strict`,
+and `strict=False` selects `func:loose`. C++ uses `FunctionMode::Default`,
+`Strict`, or `Loose`. Each method returns a new builder, so prefixes can be
+reused without mutation. `.build()` invokes the existing v1 compiler and its
+schema validation. Python `.source` and C++ `.source()` expose safely quoted
+canonical text, which can also be passed to `mamlpipe`. Execution semantics
+and metadata requirements are identical to textual pipelines.
+
+### V1 command-line examples
+
+```sh
+mamlscan --dialect maml-v1 image.bin 'E8 rel32(callee):follow CC' --capture callee
+mamlpipe --dialect maml-v1 image.bin --ranges ranges.txt \
+    'bytes("E8 rel32(callee)") -> capture("callee") -> unique'
+mamlpipe --dialect maml-v1 --batch pipelines.tsv --image image.bin --ranges ranges.txt
+python tools/check_conformance.py --adapter python -m maml.v1_adapter
+```
+
+The v1 scanner accepts single-image jobs, `--limit N`, `--expect HEX`, and an
+optional `--capture name`. Without projection it reports match offsets. Capture
+selection drops absent values and counts the remaining matches; it does not
+deduplicate equal targets. Use a pipeline for deduplicated projection.
+The pipeline CLI labels records as `matches` and projections as `values`, and
+prints capture kind and address space alongside values. Both CLIs use flat
+images with base zero; custom pointer maps and nonzero bases use the APIs.
+Pipeline manifests and input batch files keep the formats documented below.
+V1 batch output prefixes each result with the job name and a tab.
+
+### Enumeration, grammar, and execution bounds
+
+The frontend accepts whitespace-separated operations, two-nibble bytes (`??`,
+`F?`, and `?F` included), parenthesized alternatives, and the operations in the
+[normative table](#pattern-operations). Capture names use letters/underscores
+followed by letters, digits, or underscores. Gap bounds are unsigned decimal;
+`target_add` is signed decimal with an optional minus. Pipeline strings support
+`\"`, `\\`, `\n`, `\t`, and `\xHH`. Comments and punctuation from the unversioned
+grammar are not aliases in v1.
+
+Search visits start offsets in ascending order, including the end offset for
+zero-width patterns. Each start yields its first successful path, trying
+alternatives left to right and gaps shortest first. Match records are distinct
+by start offset within a scan; address/value stages sort and deduplicate typed
+values. Seed selection is conservative: it derives fixed literal runs from the
+compiled instructions up to uncertain control flow and uses the existing SIMD
+scanner. Patterns without a usable seed fall back to exhaustive starts.
+
+Patterns and pipelines are limited to 65,536 UTF-8 source bytes; patterns allow
+64 nested groups and 256 declared captures. A match attempt permits 1,000,000
+instruction steps and 1,024 pending checkpoints. Exceeding a bound raises a
+resource error, never a normal miss. C++ callers may override the instruction
+budget passed to `match_at`. There is no wall-clock or whole-scan time guarantee.
+
+`v1.generate` emits semantic patterns, verifies them in both supplied builds,
+and can infer nibble masks; see [semantic generation](#semantic-generation-and-nibble-masks).
+The unversioned generator keeps its own grammar. Portable compiled-pattern
+persistence is not implemented; retain source and its dialect identifier.
+
 ## Current runtime language
 
-The installed `Pattern`, scanner, generator, and pipeline APIs currently use
-this grammar. The [v1 contract](#maml-v1-semantics) below describes the replacement
-frontend; its function-call spellings and named captures are not accepted yet.
+The unversioned `maml.Pattern`, generator, and pipeline APIs use this grammar.
+CLI commands use it unless `--dialect maml-v1` is specified. Select the
+[v1 frontend](#using-maml-v1) for function-call spellings and named captures.
 
 | Syntax | Current behavior |
 | --- | --- |
@@ -225,7 +468,8 @@ and ranges alive and unchanged for the session.
 For the v1 spelling, `str "text"` becomes `str("text")`, `xref` becomes `xrefs`,
 and arguments such as `nth 0` become `nth(0)`. The more important change is
 `find(...) -> capture("name")`: v1 returns matches first and projects explicitly.
-Those spellings describe the design; they are not aliases accepted today.
+Those spellings are accepted by the explicit v1 frontend; they are not aliases
+in the unversioned parser.
 
 ### mamlpipe CLI and range manifests
 
@@ -316,8 +560,8 @@ PE loading through LIEF. `Image.from_file(path)` loads a flat file;
 `Image.base` is metadata; current scan offsets remain relative to the buffer.
 `Image.from_pe(path)` lays out sections by RVA, fills code/data ranges, and
 derives function ranges from x64 `.pdata` when present. It currently leaves
-`base` at zero; set `image.base` explicitly before using `to_va()` if you need
-virtual addresses.
+`base` at zero. For a nonzero base, construct an image from the flattened bytes
+with `Image.from_bytes(data, base=...)` before using `to_va()`.
 The C++ library itself does not parse executable file formats or disassemble.
 
 Scanning, generation, and pipeline execution release the Python GIL. The image
@@ -330,6 +574,102 @@ then uses fixed-byte filtering before full matching. NEON or SSE2 accelerate
 literal scanning when available; a scalar fallback remains functional. Inspect
 `maml.simd_backend()` (`neon`, `sse2`, or `scalar`) and use `mamlbench` to measure
 the build on the actual host rather than carrying over timing figures.
+
+## Semantic generation and nibble masks
+
+Use `maml.v1.generate` in Python or `<maml/v1_generate.hpp>` and
+`maml::v1::generate` in C++. The existing anchor discovery strategies emit v1
+syntax directly: call references use `rel32(target)`, RIP-relative operands
+with trailing immediates use `rel32(target, target_add=N)`, and skipped string
+reference operands use four `??` bytes. Verification and consensus compile and
+execute that semantic program, not the unversioned parser.
+
+```python
+from maml import v1
+
+# A known call to the supplied target in each synthetic build.
+def call_image(target, site, tail):
+    data = bytearray(b"\xCC" * 256)
+    data[site:site + 5] = b"\xE8" + (target - site - 5).to_bytes(4, "little", signed=True)
+    data[site + 5:site + 9] = bytes.fromhex(tail)
+    return v1.Image(data, code=[(0, 256)], funcs=[(site, site + 9)])
+
+a = call_image(16, 64, "4C 8B D1 48")
+b = call_image(32, 96, "4C 8B D7 48")
+options = v1.generate.Options(prefer_short=False, nibble_wildcards=True)
+candidates = v1.generate.verified(a, 16, b, 32, options)
+assert any("D?" in c.pattern for c in candidates)
+```
+
+The common call pattern in that example is:
+
+```text
+E8 rel32(target) 4C 8B D? 48
+```
+
+Nibble inference preserves a nibble only when both aligned programs fix it to
+the same value: `D1` and `D7` become `D?`, `A1` and `B1` become `?1`, and
+`A1` and `B2` become `??`. Existing references and their arithmetic policies
+must agree. The implementation compares compiled linear instructions, not
+text substrings, and does not guess instruction alignment across insertions,
+deletions, or different control flow.
+
+`v1.generate.Options` defaults to `max_len=64`, `want=4`, `prefer_short=True`,
+`deep_anchor=True`, and `nibble_wildcards=True`. Exact candidates are preferred;
+when the requested budget has room, verification tries generalized pairs with
+full tails of matching structure. Every generalized candidate must still match
+exactly once and resolve to the supplied target in **both** images. Two sites
+capturing the same target are still two matches and fail this check. Set
+`nibble_wildcards=False` to disable inference. Single-image `candidates()` does
+not infer changes it has never observed.
+
+V1 candidates contain `pattern`, `dialect`, `target_capture`, signed
+`anchor_delta`, `anchor_site`, `strategy`, and `literals` (fully fixed bytes).
+They have no positional `save_index`. A nonempty `target_capture` selects the
+named value; otherwise resolution computes `match.offset - anchor_delta` with
+checked arithmetic. An interior anchor is not silently treated as the target.
+Generated verified results contain at most one variant per source site and
+strategy. Consensus reports candidate indices; callers should still inspect
+source sites when judging independence across strategies or manually supplied
+candidates.
+
+Generation uses buffer-relative targets and ranges; Python requires
+`image.base == 0`. The C++ generator takes `maml::generate::Image`, whose ranges
+are already buffer-relative. Identical input-buffer identity is rejected by
+`verified()`; callers supply the independent builds and target correspondences.
+
+For consumers using the shared lower-level `maml.generate` interface,
+`Options(dialect="maml-v1", nibble_wildcards=True)` selects the same implementation.
+Its candidate transport retains a zero `save_index` field for semantic output;
+`dialect` and `target_capture` are required when constructing a transport
+candidate manually. Resolution never guesses the dialect from pattern text.
+
+### Generation coverage and possible extensions
+
+The [future generation design](docs/generation-design.md) specifies analysis
+adapters, wildcard constraints, additional strategies, and verification contracts.
+It is a proposal, not a description of implemented APIs.
+
+The current strategies are `Body`, `Xref` (direct calls), `StringAnchor`
+(including a nearby call anchor), and `RipRef`. Cross-build verification can
+also infer nibble masks for aligned linear patterns. The following strategies
+are **not generated automatically**, although the matcher supports the relevant
+syntax where indicated:
+
+| Possible strategy | Current boundary |
+| --- | --- |
+| Follow a reference and check destination bytes | References capture and continue sequentially; no emitted `:follow` |
+| Absolute pointer, vtable, or import-slot anchors | No `ptr64` candidate discovery or pointer-chain inference |
+| Jump and conditional-branch anchors | Call anchors use `E8`; no `rel8` or other branch-anchor strategy |
+| Multi-hop reference walks | No repeated followed references or pointer walks; string-plus-call anchoring already exists |
+| Infer variable gaps | No alignment across inserted/deleted bytes to generate `[min..max]` |
+| Infer alternatives | No automatic `(A | B)` synthesis for divergent layouts |
+| Synthesize locator pipelines | No search/ranking of complete `str`/`xrefs`/`func`/`find` pipelines |
+
+These are extension opportunities, not additional v1 conformance requirements.
+Instruction-level forms such as `call(...)` or `mov(...)` remain outside the
+byte-oriented language. Builder APIs construct pipelines explicitly; they do
+not infer a pipeline from an image.
 
 ## Generating and resolving patterns
 
@@ -391,8 +731,8 @@ image, candidate, options, verification, and consensus operations.
 ## MAML v1 semantics
 
 This section is the normative language contract. MUST and MUST NOT state
-requirements for implementers. It describes the new frontend, not functionality
-already provided by the current engine. The language-neutral
+requirements for implementers. The v1 frontend implements these contracts.
+The language-neutral
 [conformance vectors and adapter protocol](conformance/README.md) exercise these
 contracts independently of C++, Cython, or Python.
 
@@ -535,11 +875,11 @@ Compilation and persisted artifacts MUST identify the dialect explicitly as
 `maml-v1`. Automatic dialect guessing is prohibited. The current engine treats
 `??` as two bytes; MAML v1 treats it as one, so patterns require explicit migration.
 
-The full lexical grammar, match enumeration and gap preference, pipeline
-ordering and record identity, concrete mapper API, serialization, and resource
-limits still need specification before a complete v1 release. Conformance
-vectors avoid depending on those unsettled choices. Instruction recognition,
-implicit equality captures, and public cursor-stack operations are outside v1.
+The implementation's lexical, enumeration, and resource policies are described
+under [Using MAML v1](#using-maml-v1). The conformance vectors deliberately avoid
+depending on enumeration preferences. Portable compiled-program serialization
+and instruction recognition remain outside the current implementation.
+Implicit equality captures and public cursor-stack operations are outside v1.
 
 ## Build and run
 

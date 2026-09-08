@@ -9,7 +9,7 @@ include docs/build-validation.md
 recursive-include conformance *.md *.json
 
 # Cython sources, type marker, and the header-only C++ library.
-recursive-include python/maml *.pyx *.pxd py.typed
+recursive-include python/maml *.pyx *.pxd *.pxi py.typed
 recursive-include include *.hpp
 
 # Git ignore rules do not control setuptools distribution contents.

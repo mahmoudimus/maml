@@ -464,6 +464,8 @@ cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
 
     cdef cppclass GenOptions_t "maml::generate::Options":
         GenOptions_t()
+        string dialect
+        cbool nibble_wildcards
         size_t max_len
         int want
         cbool prefer_short
@@ -476,6 +478,8 @@ cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
     # never named as a Cython attribute anywhere in this file.
     cdef cppclass GenCandidate_t "maml::generate::Candidate":
         GenCandidate_t()
+        string dialect
+        string target_capture
         string pattern
         size_t save_index
         int64_t anchor_delta
@@ -535,6 +539,8 @@ cdef class Options:
     want: cython.size_t = 4
     prefer_short: cython.bint = True
     deep_anchor: cython.bint = True
+    dialect: str = "maml-current"
+    nibble_wildcards: cython.bint = False
 
 
 @cython.dataclasses.dataclass(frozen=True)
@@ -569,6 +575,8 @@ cdef class Candidate:
     strategy: object
     literals: cython.size_t
     seed: object
+    dialect: str
+    target_capture: str
 
 
 @cython.dataclasses.dataclass(frozen=True)
@@ -587,6 +595,8 @@ cdef GenOptions_t _to_gen_options(opt):
     cdef GenOptions_t g  # default-constructed: the C++ defaults, untouched
     if opt is None:
         return g
+    g.dialect = opt.dialect.encode()
+    g.nibble_wildcards = bool(opt.nibble_wildcards)
     g.max_len = <size_t>opt.max_len
     g.want = <int>opt.want
     g.prefer_short = <cbool>bool(opt.prefer_short)
@@ -620,6 +630,8 @@ cdef object _wrap_candidate(const GenCandidate_t& c, Image image):
     seed = Seed(c.seed.offset, seed_bytes, image, c.seed.ok())
     return Candidate(
         pattern=c.pattern.decode("utf-8"),
+        dialect=c.dialect.decode(),
+        target_capture=c.target_capture.decode(),
         save_index=c.save_index,
         anchor_delta=c.anchor_delta,
         anchor_site=c.anchor_site,
@@ -634,6 +646,8 @@ cdef vector[GenCandidate_t] _candidates_to_vec(list cands):
     cdef GenCandidate_t c
     for item in cands:
         c.pattern = item.pattern.encode("utf-8")
+        c.dialect = getattr(item,"dialect","maml-current").encode()
+        c.target_capture = getattr(item,"target_capture","").encode()
         c.save_index = <size_t>item.save_index
         c.anchor_delta = <int64_t>item.anchor_delta
         # resolve_consensus does not read this, but a round trip that dropped
@@ -859,3 +873,6 @@ def pipeline_run(Image image not None, str source not None):
                           failed_stage=failed_stage,
                           error=out.error.decode("utf-8"),
                           kind="value" if maml_pipeline_is_value(out) else "address")
+
+# Semantic dialect shares the installed native extension.
+include "_v1.pxi"

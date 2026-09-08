@@ -21,4 +21,6 @@
 // run rather than scanning for the first byte.
 #include "maml/mamlscan.hpp"
 
+#include "maml/v1.hpp"
+
 #endif // MAML_UMBRELLA_HPP

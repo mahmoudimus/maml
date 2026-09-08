@@ -1,3 +1,4 @@
+#include "maml/v1_pipeline.hpp"
 // mamlpipe -- run a locator pipeline against an image and report the addresses.
 //
 // A pipeline composes the substrate generate.hpp derives from image bytes:
@@ -203,6 +204,7 @@ namespace {
 
     void usage() {
         fprintf(stderr,
+            "v1: add --dialect maml-v1 for str(\"text\"), bytes(\"pattern\"), xrefs, capture(\"name\")\n"
             "usage: mamlpipe <image> --ranges <manifest> \"<pipeline>\" [--trace]\n"
             "       mamlpipe --batch <jobfile> --image <image> --ranges <manifest>\n"
             "\n"
@@ -229,12 +231,18 @@ namespace {
 
 int main(int argc, char** argv) {
     std::string image, ranges, jobfile, source;
-    bool batch = false, trace = false;
+    bool batch = false, trace = false, semantic = false;
     std::vector<std::string> positional;
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
-        if (a == "--batch" && i + 1 < argc) {
+        if (a == "--dialect") {
+            if (semantic || i + 1 == argc || std::string(argv[++i]) != "maml-v1") {
+                fprintf(stderr, "Expected exactly one --dialect maml-v1\n");
+                return 2;
+            }
+            semantic = true;
+        } else if (a == "--batch" && i + 1 < argc) {
             batch = true;
             jobfile = argv[++i];
         } else if (a == "--image" && i + 1 < argc) {
@@ -288,6 +296,55 @@ int main(int argc, char** argv) {
             (unsigned long long)m.size, image.c_str(), bytes.size());
 
     const generate::Image img = make_image(bytes, m);
+
+    if (semantic) {
+        auto execute = [&](const std::string& text, const std::string& name) {
+            try {
+                const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.funcs);
+                if (!name.empty())
+                    printf("%s\t", name.c_str());
+                printf("%s %s=%zu", result.ok() ? "OK" : "NONE", result.is_matches ? "matches" : "values",
+                    result.is_matches ? result.matches.size() : result.values.size());
+                for (const auto& match : result.matches) {
+                    printf(" %llx", (unsigned long long)match.offset);
+                    for (const auto& c : match.captures)
+                        printf("{%s=%llx:%s:%s}", c.name.c_str(), (unsigned long long)c.data.value, c.data.kind.c_str(), c.data.space.c_str());
+                }
+                for (const auto& value : result.values)
+                    printf(" %llx:%s:%s", (unsigned long long)value.value, value.kind.c_str(), value.space.c_str());
+                printf("\n");
+                if (trace)
+                    for (const auto& t : result.trace)
+                        fprintf(stderr, "%s %zu -> %zu\n", t.stage.c_str(), t.into, t.out);
+                return result.ok();
+            } catch (const std::exception& e) {
+                printf("%s%sERR %s\n", name.c_str(), name.empty() ? "" : "\t", e.what());
+                return false;
+            }
+        };
+        if (!batch)
+            return execute(source, "") ? 0 : 1;
+        std::ifstream jobs(jobfile);
+        if (!jobs) {
+            fprintf(stderr, "Cannot open %s\n", jobfile.c_str());
+            return 2;
+        }
+        std::string line;
+        bool ok = true;
+        while (std::getline(jobs, line)) {
+            if (line.empty())
+                continue;
+            const size_t tab = line.find('\t');
+            if (tab == std::string::npos) {
+                printf("ERR malformed pipeline job\n");
+                ok = false;
+                continue;
+            }
+            if (!execute(line.substr(tab + 1), line.substr(0, tab)))
+                ok = false;
+        }
+        return ok ? 0 : 1;
+    }
 
     if (batch)
         return run_batch(jobfile, img);
