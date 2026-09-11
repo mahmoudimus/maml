@@ -24,7 +24,7 @@ def test_the_declared_version_matches_the_compiled_one():
     """
     from importlib.metadata import PackageNotFoundError, version
     try:
-        declared = version("maml")
+        declared = version("maml-python")
     except PackageNotFoundError:
         pytest.skip("needs an install: uv pip install -e . --python .venv/bin/python")
     assert declared == maml.__version__

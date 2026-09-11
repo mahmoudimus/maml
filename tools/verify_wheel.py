@@ -49,7 +49,7 @@ def main(argv=None) -> int:
 
     # 1. the packaged version and the compiled headers agree
     from importlib.metadata import version as dist_version
-    packaged, compiled = dist_version("maml"), maml.__version__
+    packaged, compiled = dist_version("maml-python"), maml.__version__
     if packaged != compiled:
         return fail(f"dist version {packaged} != extension version {compiled}")
     print(f"  version:      {packaged} (dist and extension agree)")

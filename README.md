@@ -934,8 +934,15 @@ python /path/to/maml/tools/verify_wheel.py --expect-simd neon
 ```
 
 Use `sse2` for supported x86-64 builds. Run it with the wheel's interpreter
-outside the source tree. GitHub workflows cover C++, Python, wheel builds,
-and opt-in publishing; local checks do not establish remote CI success.
+outside the source tree. GitHub workflows cover C++, Python, and wheel builds;
+local checks do not establish remote CI success.
+
+Releases are tag-driven: bump the version in `pyproject.toml`, `CMakeLists.txt`,
+and `include/maml/maml.hpp` (the Python `__version__` is derived from the C++
+macros), move the `[Unreleased]` notes in `CHANGELOG.md` into a version
+section, then push a `vX.Y.Z` tag. `.github/workflows/deploy.yml` builds through
+`wheels.yml` and publishes the `maml-python` distribution to PyPI with trusted
+publishing -- no API token.
 
 CMake options `MAML_BUILD_TESTS` and `MAML_BUILD_TOOLS` default to enabled when
 MAML is the top-level project and disabled when embedded with `add_subdirectory`.
@@ -955,7 +962,7 @@ MAML is the top-level project and disabled when embedded with `add_subdirectory`
 | `tools/durability/` | Cross-build measurement and resolution tools |
 | `tests/` | C++ and Python runtime tests |
 | `conformance/` | Language-neutral v1 vectors and adapter protocol |
-| `.github/workflows/` | CI, wheels, and opt-in release publishing |
+| `.github/workflows/` | CI, wheels, and tag-triggered PyPI publishing |
 
 Runtime tests include crowded images with decoy instructions and varied bytes,
 not only tiny fixtures where almost any literal is unique. Structural checks

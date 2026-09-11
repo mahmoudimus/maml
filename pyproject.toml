@@ -3,7 +3,9 @@ requires = ["setuptools>=77.0.1", "wheel", "cython>=3.1.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "maml"
+# Distribution name only. The import package stays `maml` (see
+# tool.setuptools.packages.find below); `maml` on PyPI is an unrelated project.
+name = "maml-python"
 version = "0.1.0"
 description = "Byte-pattern matching for binaries, with a seed-then-refine scanner"
 readme = "README.md"
