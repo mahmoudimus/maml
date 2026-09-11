@@ -157,8 +157,8 @@ def test_every_stageresult_field_is_populated(img):
         for f in seen:
             if getattr(s, f) not in (0, "", None, [], False):
                 seen[f] = True
-    assert all(seen.values()), f"StageResult fields never non-default: {
-        [f for f, v in seen.items() if not v]}"
+    missing = [name for name, v in seen.items() if not v]
+    assert not missing, f"StageResult fields never non-default: {missing}"
 
 
 def test_every_pipelineresult_field_is_populated(img):
@@ -186,8 +186,8 @@ def test_every_pipelineresult_field_is_populated(img):
     assert scenarios["failing"].error, "error never populated"
     assert scenarios["failing"].failed_stage == 1, "failed_stage never populated"
     assert scenarios["value"].kind == "value", "kind never leaves 'address'"
-    assert all(seen.values()), f"never non-default: {
-        [f for f, v in seen.items() if not v]}"
+    missing = [name for name, v in seen.items() if not v]
+    assert not missing, f"never non-default: {missing}"
 
 
 @pytest.fixture
@@ -241,8 +241,8 @@ def test_every_candidate_field_is_populated(gen_img):
         for f in seen:
             if getattr(c, f) not in (0, "", None, [], False):
                 seen[f] = True
-    assert all(seen.values()), f"Candidate fields never non-default: {
-        [f for f, v in seen.items() if not v]}"
+    missing = [name for name, v in seen.items() if not v]
+    assert not missing, f"Candidate fields never non-default: {missing}"
 
 
 def test_anchor_site_is_the_anchor_not_the_target(gen_img):
