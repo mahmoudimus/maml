@@ -33,13 +33,12 @@ from pathlib import Path
 
 import pytest
 
-import maml
-from maml import generate, pipeline
+from maml import Range, _core, v1
 
 
 ROOT = Path(__file__).resolve().parents[2]
 HEADERS = {
-    "pipeline": ROOT / "include" / "maml" / "pipeline.hpp",
+    "pipeline": ROOT / "include" / "maml" / "v1_pipeline.hpp",
     "generate": ROOT / "include" / "maml" / "generate.hpp",
     "mamlscan": ROOT / "include" / "maml" / "mamlscan.hpp",
 }
@@ -47,16 +46,13 @@ HEADERS = {
 # C++ field name -> Python field name, for the renames the binding is FORCED
 # to make. Anything not listed here must match by name; that is the point.
 RENAMES = {
-    ("StageResult", "in"): "into",
+    ("PipelineResult", "is_matches"): "kind",
 }
 
 # C++ fields deliberately not surfaced, each with the reason. A field added to
 # C++ and forgotten is a test failure; a field added and consciously withheld
 # is one line here. The distinction is the whole value of this file.
 NOT_BOUND = {
-    # ResultKind is surfaced as the `kind` string instead, so a caller cannot
-    # confuse a value result with an address result. See PipelineResult.values.
-    ("PipelineResult", "kind"): "surfaced as the `kind` str, set from is_value()",
 }
 
 
@@ -86,12 +82,11 @@ def py_fields(cls):
 
 
 BOUND = [
-    ("pipeline", "StageResult", pipeline.StageResult),
-    ("pipeline", "PipelineResult", pipeline.PipelineResult),
-    ("generate", "Candidate", generate.Candidate),
-    ("generate", "Resolution", generate.Resolution),
-    ("generate", "Options", generate.Options),
-    ("mamlscan", "Hit", maml.Hit),
+    ("pipeline", "Trace", v1.StageResult),
+    ("pipeline", "PipelineResult", v1.PipelineResult),
+    ("generate", "Candidate", _core.Candidate),
+    ("generate", "Resolution", _core.Resolution),
+    ("generate", "Options", _core.Options),
 ]
 
 # The types that carry data OUT of C++. These must have NO field defaults --
@@ -133,26 +128,15 @@ def test_no_python_field_is_invented(header, struct, cls):
 
 @pytest.fixture
 def img():
-    """An image with a call site, so a pipeline exercises every field."""
+    """An image with a function body, so a pipeline exercises every field."""
     b = bytearray(0x800)
-    #  0x100  function entry, then a body that `func` will pull an address to
     b[0x100:0x108] = bytes([0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56])
-    i = maml.Image.from_bytes(bytes(b))
-    i.code = [maml.Range(0, 0x800)]
-    i.funcs = [maml.Range(0x100, 0x200)]
-    return i
-
+    return v1.Image(bytes(b), code=[(0, 0x800)], funcs=[(0x100, 0x200)])
 
 def test_every_stageresult_field_is_populated(img):
-    """Each field observed holding a non-default value at least once.
-
-    `moved` is the reason this test exists: it was present in the C++ struct
-    and absent from the binding, and a name-only check would have caught that
-    -- but a field bound to a constant 0 would pass a name check and fail
-    here.
-    """
-    r = pipeline.run(img, 'bytes "41 57 41 56" -> func')
-    seen = {f: False for f in py_fields(pipeline.StageResult)}
+    """Each field observed holding a non-default value at least once."""
+    r = v1.Pipeline('bytes("41 57 41 56") -> func').run(img)
+    seen = {f: False for f in py_fields(v1.StageResult)}
     for s in r.trace:
         for f in seen:
             if getattr(s, f) not in (0, "", None, [], False):
@@ -162,30 +146,23 @@ def test_every_stageresult_field_is_populated(img):
 
 
 def test_every_pipelineresult_field_is_populated(img):
-    """Three runs, because no single pipeline can make every field non-default.
-
-    A successful run cannot set `error`; a failing one cannot set `ok`. That
-    is why this walks scenarios rather than asserting on one result.
+    """Two runs, because no single pipeline can make every field non-default.
     """
-    scenarios = {
-        "ok":           pipeline.run(img, 'bytes "55 48 89 E5" -> func'),
-        "failing":      pipeline.run(img, 'bytes "41 57 41 56" -> func:strict'),
-        "value":        pipeline.run(img, 'bytes "55 48 89 E5" -> read 4'),
-    }
-    seen = {f: False for f in py_fields(pipeline.PipelineResult)}
-    for r in scenarios.values():
+    matches = v1.Pipeline('bytes("55 @(entry) 48 89 E5")').run(img)
+    values = v1.Pipeline('bytes("55 48 89 E5") -> read(4)').run(img)
+    seen = {f: False for f in py_fields(v1.PipelineResult)}
+    for r in (matches, values):
         for f in seen:
             v = getattr(r, f)
-            if v not in (0, "", None, [], False) or (f == "kind" and v == "value"):
+            if v not in (0, "", None, [], False, ()) or (f == "kind" and v):
                 seen[f] = True
-
-    # Each field, named individually, so a failure says WHICH one is dead.
-    assert scenarios["ok"].ok is True
-    assert scenarios["ok"].addresses == [0x100]
-    assert scenarios["ok"].trace, "trace never populated"
-    assert scenarios["failing"].error, "error never populated"
-    assert scenarios["failing"].failed_stage == 1, "failed_stage never populated"
-    assert scenarios["value"].kind == "value", "kind never leaves 'address'"
+    assert matches.ok is True
+    assert matches.kind == "matches"
+    assert matches.matches
+    assert matches.trace
+    assert matches.schema
+    assert values.kind == "values"
+    assert values.values
     missing = [name for name, v in seen.items() if not v]
     assert not missing, f"never non-default: {missing}"
 
@@ -216,10 +193,10 @@ def gen_img():
     buf[0x140] = 0xE8
     buf[0x141:0x145] = rel.to_bytes(4, "little", signed=True)
 
-    i = maml.Image.from_bytes(bytes(buf))
-    i.code = [maml.Range(0, 0x300)]
-    i.rodata = [maml.Range(0x300, 0x300 + len(text))]
-    i.funcs = [maml.Range(0x100, 0x200)]
+    i = _core.Image.from_bytes(bytes(buf))
+    i.code = [Range(0, 0x300)]
+    i.rodata = [Range(0x300, 0x300 + len(text))]
+    i.funcs = [Range(0x100, 0x200)]
     return i
 
 
@@ -232,11 +209,12 @@ def test_every_candidate_field_is_populated(gen_img):
     reporting every anchor at address 0 -- which reads as "all these anchors
     are the same one", the precise opposite of what the field is for.
     """
-    cands = generate.candidates(gen_img, 0x180, generate.Options(want=8))
-    cands += generate.candidates(gen_img, 0x180, generate.Options(want=8, dialect="maml-v1"))
+    cands = _core.generate_candidates(gen_img, 0x180, _core.Options(want=8))
     assert cands, "fixture produced no candidates; the test proves nothing"
 
-    seen = {f: False for f in py_fields(generate.Candidate)}
+    # v1 capturing candidates use target_capture and leave save_index at 0.
+    skip = {"save_index"}
+    seen = {f: False for f in py_fields(_core.Candidate) if f not in skip}
     for c in cands:
         for f in seen:
             if getattr(c, f) not in (0, "", None, [], False):
@@ -252,18 +230,18 @@ def test_anchor_site_is_the_anchor_not_the_target(gen_img):
     that copied the target, or the match offset, would pass the check above
     and still be useless for counting distinct anchors.
     """
-    cands = generate.candidates(gen_img, 0x180, generate.Options(want=8))
+    cands = _core.generate_candidates(gen_img, 0x180, _core.Options(want=8))
     by_strategy = {c.strategy: c for c in cands}
 
-    sa = by_strategy.get(generate.Strategy.StringAnchor)
+    sa = by_strategy.get(_core.Strategy.StringAnchor)
     assert sa is not None
     assert sa.anchor_site == 0x110          # the lea, not the string, not 0x180
 
-    xr = by_strategy.get(generate.Strategy.Xref)
+    xr = by_strategy.get(_core.Strategy.Xref)
     assert xr is not None
     assert xr.anchor_site == 0x140          # the call site
 
-    bd = by_strategy.get(generate.Strategy.Body)
+    bd = by_strategy.get(_core.Strategy.Body)
     assert bd is not None
     assert bd.anchor_site == 0x180          # here the target IS the anchor
 
@@ -275,17 +253,13 @@ def test_anchor_site_is_the_anchor_not_the_target(gen_img):
     assert len({c.anchor_site for c in cands}) == len(cands)
 
 
-def test_the_forced_rename_is_the_only_one(img):
-    """`into` exists, `in` does not, and `in` is a keyword -- hence the rename.
-
-    Pinned so nobody 'fixes' the asymmetry by renaming the C++ field, which
-    would break every C++ caller for a Python-only reason.
-    """
-    r = pipeline.run(img, 'bytes "41 57 41 56" -> func')
+def test_trace_uses_into_not_in(img):
+    """`into` exists and `in` does not -- `in` is a Python keyword."""
+    r = v1.Pipeline('bytes("41 57 41 56") -> func').run(img)
     s = r.trace[-1]
     assert s.into >= 1
     assert not hasattr(s, "in_"), "the C++ spelling leaked into the Python API"
-    assert "in" not in py_fields(pipeline.StageResult)
+    assert "in" not in py_fields(v1.StageResult)
 
 
 def test_bound_result_types_have_no_defaults():
@@ -329,17 +303,15 @@ def test_omitting_a_field_is_a_TypeError(cls):
 
 
 def test_they_are_still_dataclasses_and_still_frozen():
-    """The conversion to cdef classes kept what the dataclasses gave.
-
-    If `dataclasses.fields()` ever stops working on these, the completeness
+    """If `dataclasses.fields()` ever stops working on these, the completeness
     tests above go silently vacuous -- they would iterate an empty field list
     and pass. This is the guard on the guard.
     """
     import dataclasses as dc
-    r = pipeline.StageResult("bytes", 1, 2, 3)
+    r = v1.StageResult("bytes", 1, 2)
     assert dc.is_dataclass(r)
-    assert dc.fields(pipeline.StageResult), "fields() empty: the checks above are vacuous"
-    assert repr(r) == "StageResult(stage='bytes', into=1, out=2, moved=3)"
-    assert r == pipeline.StageResult("bytes", 1, 2, 3)
+    assert dc.fields(v1.StageResult), "fields() empty: the checks above are vacuous"
+    assert repr(r) == "StageResult(stage='bytes', into=1, out=2)"
+    assert r == v1.StageResult("bytes", 1, 2)
     with pytest.raises(AttributeError):
-        r.moved = 9
+        r.into = 9

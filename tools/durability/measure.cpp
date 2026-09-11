@@ -57,9 +57,11 @@ static Build load(const std::string& tag) {
 }
 
 static size_t hits(const Build& b, const generate::Candidate& c) {
-    auto comp = locate::compile(c.pattern);
-    locate::prime(comp, b.bytes);
-    return locate::find_all(b.bytes, comp, c.save_index, 2).size();
+    try {
+        return v1::Pattern(c.pattern).find_all(v1::Image{ b.bytes }, 2).size();
+    } catch (...) {
+        return 0;
+    }
 }
 
 int main(int argc, char** argv) {

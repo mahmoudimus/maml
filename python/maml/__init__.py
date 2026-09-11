@@ -1,9 +1,46 @@
 """Byte-pattern matching for binaries."""
+from maml._core import cpp_version, simd_backend
+from maml.v1 import (
+    CaptureValue,
+    CardinalityError,
+    CompileError,
+    ExecutionError,
+    Image,
+    Match,
+    Pattern,
+    Pipeline,
+    PipelineBuilder,
+    PipelineResult,
+    SchemaError,
+    StageResult,
+    generate,
+    project,
+    unique_matches,
+)
+from . import v1
 from maml._containers import Range
-from maml._core import (Hit, Image, Pattern, PatternError, Primed, Seed,
-                             cpp_version, simd_backend)
 
 __version__ = "%d.%d.%d" % cpp_version()
 
-__all__ = ["cpp_version", "simd_backend", "Hit", "Image", "Pattern",
-           "PatternError", "Primed", "Range", "Seed", "__version__"]
+__all__ = [
+    "CaptureValue",
+    "CardinalityError",
+    "CompileError",
+    "ExecutionError",
+    "Image",
+    "Match",
+    "Pattern",
+    "Pipeline",
+    "PipelineBuilder",
+    "PipelineResult",
+    "Range",
+    "SchemaError",
+    "StageResult",
+    "cpp_version",
+    "generate",
+    "project",
+    "simd_backend",
+    "unique_matches",
+    "v1",
+    "__version__",
+]

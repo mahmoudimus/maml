@@ -67,17 +67,16 @@ def main(argv=None) -> int:
 
     # 3. it actually scans
     img = bytes([0x90] * 64 + [0x4C, 0x8B, 0xD0] + [0x90] * 64)
-    hit = maml.Pattern("4C 8B D0").find(maml.Image.from_bytes(img))
+    hit = maml.Pattern("4C 8B D0").find(maml.Image(img))
     if hit is None or hit.offset != 64:
         return fail(f"scan returned {hit!r}; expected a hit at offset 64")
     print(f"  scan:         hit at offset {hit.offset}")
 
-    from maml import v1
-    semantic = v1.Image(bytes.fromhex("E8 01 00 00 00 90 CC"))
-    result = v1.Pipeline('bytes("E8 rel32(x):follow CC") -> capture("x") -> unique').run(semantic)
-    if result.values != (v1.CaptureValue(6, "ResolvedRelativeTarget", "image"),):
+    semantic = maml.Image(bytes.fromhex("E8 01 00 00 00 90 CC"))
+    result = maml.Pipeline('bytes("E8 rel32(x):follow CC") -> capture("x") -> unique').run(semantic)
+    if result.values != (maml.CaptureValue(6, "ResolvedRelativeTarget", "image"),):
         return fail("semantic pipeline did not resolve its named capture")
-    print("  maml-v1:      named capture and pipeline passed")
+    print("  pipeline:     named capture and pipeline passed")
 
     print("wheel OK")
     return 0

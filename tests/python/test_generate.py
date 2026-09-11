@@ -2,8 +2,19 @@ import struct
 
 import pytest
 
-import maml
-from maml import generate
+from maml import Image, Pattern, Range, _core
+
+
+def _as_v1(img):
+    return Image(bytes(img[i] for i in range(img.size)))
+
+
+def _resolve(c, img):
+    hit = Pattern(c.pattern).find(_as_v1(img))
+    assert hit is not None
+    if c.target_capture:
+        return hit.capture(c.target_capture).value
+    return hit.offset - c.anchor_delta
 
 
 # ── fixtures, mirrored from tests/test_generate.cpp's C++ helpers ───────
@@ -50,15 +61,15 @@ def test_candidates_returns_candidates_with_the_documented_fields():
     # No E8 anywhere in this fixture, so only Body can emit -- it needs no
     # caller, only a target. Mirrors test_generate.cpp's "the generate
     # surface is callable, and Body emits from any address".
-    img = maml.Image.from_bytes(b"\xCC" * 0x100)
-    img.code = [maml.Range(begin=0, end=0x100)]
+    img = _core.Image.from_bytes(b"\xCC" * 0x100)
+    img.code = [Range(begin=0, end=0x100)]
 
-    cs = generate.candidates(img, 0x10)
+    cs = _core.generate_candidates(img, 0x10)
     assert len(cs) == 1
     c = cs[0]
-    assert isinstance(c, generate.Candidate)
+    assert isinstance(c, _core.Candidate)
     assert isinstance(c.pattern, str) and c.pattern
-    assert c.strategy == generate.Strategy.Body
+    assert c.strategy == _core.Strategy.Body
     assert c.save_index == 0
     assert c.anchor_delta == 0
     assert c.literals == 64
@@ -72,22 +83,22 @@ def test_candidates_respects_options_want():
     # pass without `want` doing anything -- see _make_xref_image_varied).
     sites = [(0x200 + 0x100 * i, bytes([0x40 + i, 0x8B, 0xD0, 0x48, 0x85, 0xC0]))
              for i in range(5)]
-    img = maml.Image.from_bytes(bytes(_make_xref_image_varied(0x100, sites)))
-    img.code = [maml.Range(begin=0, end=0x1000)]
+    img = _core.Image.from_bytes(bytes(_make_xref_image_varied(0x100, sites)))
+    img.code = [Range(begin=0, end=0x1000)]
 
-    assert len(generate.candidates(img, 0x100, generate.Options(want=2))) == 2
-    assert len(generate.candidates(img, 0x100, generate.Options(want=3))) == 3
+    assert len(_core.generate_candidates(img, 0x100, _core.Options(want=2))) == 2
+    assert len(_core.generate_candidates(img, 0x100, _core.Options(want=3))) == 3
 
 
 # ── verified() ────────────────────────────────────────────────────────
 
 def test_verified_across_two_synthetic_images():
     tail = bytes([0x4C, 0x8B, 0xD0, 0x48, 0x85, 0xC0])
-    a = maml.Image.from_bytes(bytes(_make_xref_image(0x100, [0x200], tail)))
-    b = maml.Image.from_bytes(bytes(_make_xref_image(0x180, [0x300], tail)))
-    a.code = b.code = [maml.Range(begin=0, end=0x1000)]
+    a = _core.Image.from_bytes(bytes(_make_xref_image(0x100, [0x200], tail)))
+    b = _core.Image.from_bytes(bytes(_make_xref_image(0x180, [0x300], tail)))
+    a.code = b.code = [Range(begin=0, end=0x1000)]
 
-    v = generate.verified(a, 0x100, b, 0x180)
+    v = _core.generate_verified(a, 0x100, b, 0x180)
     assert v
 
     # Each surviving candidate must actually resolve to its own target in
@@ -95,18 +106,15 @@ def test_verified_across_two_synthetic_images():
     # rather than trusting verified()'s own claim.
     for c in v:
         for img, want in ((a, 0x100), (b, 0x180)):
-            hit = maml.Pattern(c.pattern).find(img, c.save_index)
-            assert hit is not None
-            got = hit.value if c.save_index else hit.offset - c.anchor_delta
-            assert got == want
+            assert _resolve(c, img) == want
 
 
 def test_verified_refuses_the_same_image_twice():
-    img = maml.Image.from_bytes(bytes(_make_call_image(0x100, [0x200])))
-    img.code = [maml.Range(begin=0, end=0x1000)]
+    img = _core.Image.from_bytes(bytes(_make_call_image(0x100, [0x200])))
+    img.code = [Range(begin=0, end=0x1000)]
     # The C++ guard compares buffer identity (pointer + size), which the
     # SAME Image object always satisfies against itself.
-    assert generate.verified(img, 0x100, img, 0x100) == []
+    assert _core.generate_verified(img, 0x100, img, 0x100) == []
 
 
 # ── anchor_delta sign ────────────────────────────────────────────────
@@ -132,13 +140,13 @@ def test_negative_anchor_delta_survives_the_round_trip():
     for k in range(4):
         buf[lea_site + 3 + k] = (disp >> (8 * k)) & 0xFF
 
-    img = maml.Image.from_bytes(bytes(buf))
-    img.code = [maml.Range(begin=0, end=0x300)]
-    img.rodata = [maml.Range(begin=0x300, end=0x300 + len(s))]
-    img.funcs = [maml.Range(begin=0x100, end=0x200)]
+    img = _core.Image.from_bytes(bytes(buf))
+    img.code = [Range(begin=0, end=0x300)]
+    img.rodata = [Range(begin=0x300, end=0x300 + len(s))]
+    img.funcs = [Range(begin=0x100, end=0x200)]
 
-    cs = generate.candidates(img, target)
-    string_anchors = [c for c in cs if c.strategy == generate.Strategy.StringAnchor]
+    cs = _core.generate_candidates(img, target)
+    string_anchors = [c for c in cs if c.strategy == _core.Strategy.StringAnchor]
     assert string_anchors
     c = string_anchors[0]
     assert c.anchor_delta == lea_site - target
@@ -146,9 +154,7 @@ def test_negative_anchor_delta_survives_the_round_trip():
 
     # SIGNED subtraction must recover the real target; an unsigned one would
     # wrap silently instead.
-    hit = maml.Pattern(c.pattern).find(img, c.save_index)
-    assert hit is not None
-    assert hit.offset - c.anchor_delta == target
+    assert _resolve(c, img) == target
 
 
 # ── resolve_consensus() ──────────────────────────────────────────────
@@ -167,16 +173,16 @@ def test_resolve_consensus_groups_and_orders_by_agreement():
     buf[0x200:0x206] = a1       # resolves to 0x200 - 0
     buf[0x300:0x306] = a2       # resolves to 0x300 - 0x100 == 0x200 too
     buf[0x500:0x506] = lone     # resolves to 0x500, on its own
-    img = maml.Image.from_bytes(bytes(buf))
+    img = _core.Image.from_bytes(bytes(buf))
 
     def mk(at, delta):
-        return generate.Candidate(dialect="maml-current", target_capture="",
+        return _core.Candidate(dialect="maml-v1", target_capture="",
             pattern=_hex(buf[at:at + 6]), save_index=0, anchor_delta=delta,
-            anchor_site=at, strategy=generate.Strategy.Body, literals=6,
+            anchor_site=at, strategy=_core.Strategy.Body, literals=6,
             seed=None)
 
     cands = [mk(0x500, 0), mk(0x200, 0), mk(0x300, 0x100)]
-    groups = generate.resolve_consensus(img, cands)
+    groups = _core.generate_resolve_consensus(img, cands)
 
     assert len(groups) == 2
     assert groups[0].address == 0x200
@@ -190,20 +196,20 @@ def test_resolve_consensus_drops_anchors_not_unique_in_the_new_image():
     run = bytes([0x11, 0x22, 0x33, 0x44, 0x55, 0x66])
     buf[0x100:0x106] = run
     buf[0x400:0x406] = run  # the SAME bytes twice: not unique
-    img = maml.Image.from_bytes(bytes(buf))
+    img = _core.Image.from_bytes(bytes(buf))
 
-    amb = generate.Candidate(dialect="maml-current", target_capture="", pattern=_hex(run), save_index=0, anchor_delta=0,
-                              anchor_site=0x100, strategy=generate.Strategy.Body,
+    amb = _core.Candidate(dialect="maml-v1", target_capture="", pattern=_hex(run), save_index=0, anchor_delta=0,
+                              anchor_site=0x100, strategy=_core.Strategy.Body,
                               literals=6, seed=None)
-    assert generate.resolve_consensus(img, [amb]) == []
+    assert _core.generate_resolve_consensus(img, [amb]) == []
 
     # Positive control: made unique, the same anchor does vote. Without this,
     # an empty result above proves nothing -- a binding that always returns
     # [] (e.g. one that silently corrupts save_index) would pass the
     # assertion above for the wrong reason.
     buf[0x400:0x406] = b"\xCC" * 6
-    img2 = maml.Image.from_bytes(bytes(buf))
-    ok = generate.resolve_consensus(img2, [amb])
+    img2 = _core.Image.from_bytes(bytes(buf))
+    ok = _core.generate_resolve_consensus(img2, [amb])
     assert len(ok) == 1
     assert ok[0].address == 0x100
 
@@ -211,12 +217,12 @@ def test_resolve_consensus_drops_anchors_not_unique_in_the_new_image():
 # ── Strategy / Options shape ─────────────────────────────────────────
 
 def test_strategy_members_match_the_cpp_enum():
-    names = [s.name for s in generate.Strategy]
+    names = [s.name for s in _core.Strategy]
     assert names == ["Body", "Xref", "StringAnchor", "RipRef"]
 
 
 def test_options_defaults_match_the_cpp_struct():
-    o = generate.Options()
+    o = _core.Options()
     assert o.max_len == 64
     assert o.want == 4
     assert o.prefer_short is True
@@ -279,7 +285,7 @@ def test_from_pe_fills_code_and_rodata(tmp_path):
     pytest.importorskip("lief", reason="needs the maml[pe] extra")
     out = _build_pe_with_sections(tmp_path)
 
-    img = maml.Image.from_pe(str(out))
+    img = _core.Image.from_pe(str(out))
 
     assert [r.name for r in img.code] == [".text"]
     assert img.code[0].begin == 0x1000
@@ -295,7 +301,7 @@ def test_from_pe_fills_funcs_from_pdata_filtered_to_text(tmp_path):
     pytest.importorskip("lief", reason="needs the maml[pe] extra")
     out = _build_pe_with_sections(tmp_path)
 
-    img = maml.Image.from_pe(str(out))
+    img = _core.Image.from_pe(str(out))
 
     assert len(img.funcs) == 1
     assert img.funcs[0].begin == 0x1008
@@ -324,7 +330,7 @@ def test_from_pe_leaves_funcs_empty_without_pdata(tmp_path):
     builder.build()
     builder.write(str(out))
 
-    img = maml.Image.from_pe(str(out))
+    img = _core.Image.from_pe(str(out))
     assert img.funcs == []
 
 

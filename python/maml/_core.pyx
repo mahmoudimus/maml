@@ -11,11 +11,10 @@ from cpython.buffer cimport (PyObject_GetBuffer, PyBuffer_Release,
                              PyBUF_SIMPLE)
 
 
-cdef extern from "maml/maml.hpp":
+cdef extern from "maml/version.hpp":
     int MAML_VERSION_MAJOR
     int MAML_VERSION_MINOR
     int MAML_VERSION_PATCH
-
 
 def cpp_version():
     """(major, minor, patch) of the C++ headers this extension compiled against."""
@@ -58,70 +57,16 @@ def simd_backend():
 
 
 # Cython's default `except +` maps any C++ exception to RuntimeError and
-# discards its payload. ParseException carries the error kind and the token
-# span, which is the entire reason a bad pattern raises instead of returning
-# None -- so translate it by hand.
-#
-# maml::to_string(ParseErrorType) does not exist in the vendored
-# headers (include/maml/maml.hpp is off-limits to edit), so the
-# enum-to-name mapping is a switch inlined here instead.
+# discards its payload. generate.hpp throws maml::v1::Error.
 cdef extern from *:
     """
     #include <Python.h>
-    #include "maml/maml.hpp"
-
-    static const char* maml_parse_error_type_name(maml::ParseErrorType t) {
-        switch (t) {
-            case maml::ParseErrorType::UnexpectedToken: return "UnexpectedToken";
-            case maml::ParseErrorType::UnexpectedEnd: return "UnexpectedEnd";
-            case maml::ParseErrorType::MaskByteLenMismatch: return "MaskByteLenMismatch";
-            case maml::ParseErrorType::HexValueInvalid: return "HexValueInvalid";
-            case maml::ParseErrorType::HexValueIncomplete: return "HexValueIncomplete";
-            case maml::ParseErrorType::GroupNotClosed: return "GroupNotClosed";
-            case maml::ParseErrorType::BlockNotClosed: return "BlockNotClosed";
-            case maml::ParseErrorType::RangeBoundInvalid: return "RangeBoundInvalid";
-            case maml::ParseErrorType::RangeEndMustBeGraterThenStart: return "RangeEndMustBeGraterThenStart";
-            case maml::ParseErrorType::SequenceTooLarge: return "SequenceTooLarge";
-            case maml::ParseErrorType::InternalError: return "InternalError";
-        }
-        return nullptr;
-    }
-
-    static PyObject* maml_pattern_error_type = nullptr;
-
-    extern "C" void maml_register_pattern_error(PyObject* t) {
-        Py_XINCREF(t);
-        Py_XSETREF(maml_pattern_error_type, t);
-    }
-
+    #include "maml/v1.hpp"
     extern "C" void raise_pattern_error() {
         try {
             throw;
-        } catch (const maml::ParseException& e) {
-            const char* kind = maml_parse_error_type_name(e.type);
-            PyObject* args = Py_BuildValue(
-                "(snn)", e.what(),
-                (Py_ssize_t)e.position.first, (Py_ssize_t)e.position.second);
-            PyObject* kw = Py_BuildValue("{s:s}", "kind", kind ? kind : "Unknown");
-            if (args && kw && maml_pattern_error_type) {
-                PyObject* exc = PyObject_Call(maml_pattern_error_type, args, kw);
-                if (exc) { PyErr_SetObject(maml_pattern_error_type, exc); Py_DECREF(exc); }
-            }
-            Py_XDECREF(args);
-            Py_XDECREF(kw);
-            // The three-way guard above (args && kw && maml_pattern_error_type)
-            // has failure branches -- OOM building args/kw, or this function
-            // called before maml_register_pattern_error runs -- that fall
-            // through without ever calling PyErr_SetObject/PyErr_SetString.
-            // Cython treats "returned from except+ handler" as "translated,
-            // a Python exception is now pending"; returning here with none
-            // set is undefined downstream, not a clean no-op. Guarantee this
-            // catch clause never returns without one pending.
-            if (!PyErr_Occurred()) {
-                PyErr_SetString(PyExc_RuntimeError,
-                                "maml: pattern parse failed and the error type "
-                                "was unavailable");
-            }
+        } catch (const maml::v1::Error& e) {
+            PyErr_SetString(PyExc_ValueError, e.what());
         } catch (const std::bad_alloc&) {
             PyErr_NoMemory();
         } catch (const std::exception& e) {
@@ -131,39 +76,7 @@ cdef extern from *:
         }
     }
     """
-    void maml_register_pattern_error(object)
     void raise_pattern_error()
-
-
-# `Compiled` (a real struct in mamlscan.hpp: offset + a std::vector<uint8_t>)
-# gets copy-assigned in Pattern.prime() to seed a fresh Primed. A bare `dst =
-# src` at the Cython level is a plain C++ assignment with no `except +`
-# anywhere near it; the vector's copy constructor can throw bad_alloc, and an
-# exception with no handler in scope reaches std::terminate instead of
-# becoming a Python exception. Route the assignment through a tiny helper
-# that Cython DOES wrap in `except +`.
-cdef extern from *:
-    """
-    static inline void maml_assign_compiled(
-            maml::locate::Compiled& dst,
-            const maml::locate::Compiled& src) {
-        dst = src;
-    }
-    """
-    void maml_assign_compiled(Compiled&, const Compiled&) except +
-
-
-class PatternError(ValueError):
-    """A pattern that did not parse, with the span the parser blamed."""
-
-    def __init__(self, message, start=0, end=0, kind="Unknown"):
-        super().__init__(message)
-        self.kind = kind
-        self.start = start
-        self.end = end
-
-
-maml_register_pattern_error(PatternError)
 
 
 cdef class Image:
@@ -245,60 +158,6 @@ cdef class Image:
         return "Image(size=%d, base=0x%x)" % (self.size, self.base)
 
 
-cdef class Pattern:
-    """A parsed pattern, independent of any image. Parse once, prime per image."""
-
-    def __cinit__(self, text):
-        self.text = text
-        self._c = cpp_compile(text.encode("utf-8"))
-
-    def __repr__(self):
-        return "Pattern(%r)" % (self.text,)
-
-    def prime(self, Image image not None, cbool exact=True):
-        """Choose a seed for THIS image. Reusable; re-prime for another image."""
-        cdef Primed p = Primed.__new__(Primed)
-        maml_assign_compiled(p._c, self._c)
-        p._img = image
-        cdef ByteSpan sp = ByteSpan(image._data(), image.size)
-        cdef size_t cap = kSeedCapExact if exact else kSeedCapLoadTime
-        with nogil:
-            cpp_prime(p._c, sp, cap)
-        # Built eagerly, here, while `p` is still thread-local and no other
-        # thread can hold a reference to it yet. `Primed.seed` used to build
-        # this lazily in pure Python with a check-then-build-then-store
-        # sequence; two threads racing the first `.seed` access could both
-        # see `self._seed is None`, both build a `Seed`, and the loser's
-        # write would win, breaking `p.seed is p.seed` identity. Doing it
-        # here removes the race instead of guarding it with a lock. The
-        # expensive part, `count`, stays lazy on `Seed` itself.
-        cdef const Seed_t* s = &p._c.seed
-        cdef bytes seed_bytes = bytes(
-            [s.bytes[i] for i in range(s.bytes.size())])
-        p._seed = Seed(s.offset, seed_bytes, image, s.ok())
-        return p
-
-    def find(self, Image image not None, size_t save_index=0):
-        """One-shot. Equals prime(image).find(save_index)."""
-        return self.prime(image).find(save_index)
-
-
-@cython.dataclasses.dataclass(frozen=True)
-cdef class Hit:
-    """One match, and what it cost to find.
-
-    A cdef dataclass rather than a plain one: the fields are C-typed storage,
-    and -- the reason it matters -- NONE of them has a default. A bound field
-    with a default accepts being omitted at the construction site and yields a
-    plausible zero, which is exactly how StageResult::moved went missing. With
-    no defaults, omitting one is a TypeError on the first call.
-    """
-    offset: cython.size_t
-    value: cython.size_t
-    candidates: cython.size_t
-    verified: cython.size_t
-
-
 class Seed:
     """The run `prime()` chose for one image.
 
@@ -363,69 +222,6 @@ def _count_occurrences(Image img not None, bytes needle):
     with nogil:
         out = count_up_to(sp, n, kSeedCapExact)
     return out
-
-
-cdef class Primed:
-    """A pattern with a seed chosen for one specific image.
-
-    Not constructible directly -- `Pattern.prime()` is the only supported
-    way to get one. `__cinit__` stays permissive (no `_img` guard there) so
-    `Primed.__new__(Primed)` still works from `Pattern.prime`; `__init__` is
-    what a bare `Primed()` call from Python hits, and that is rejected.
-    `Primed.__new__(Primed)` from OUTSIDE `Pattern.prime` still bypasses
-    `__init__` entirely, though, leaving `_img` as None -- so every method
-    below additionally guards on `self._img is None` and raises instead of
-    dereferencing it.
-    """
-
-    def __cinit__(self):
-        self._seed = None
-
-    def __init__(self, *args, **kwargs):
-        raise TypeError(
-            "Primed is not constructible directly; use Pattern.prime(image)")
-
-    def find(self, size_t save_index=0):
-        if self._img is None:
-            raise TypeError("Primed must come from Pattern.prime(image)")
-        cdef ByteSpan sp = ByteSpan(self._img._data(), self._img.size)
-        cdef optional[Hit_t] r
-        with nogil:
-            r = cpp_find(sp, self._c, save_index)
-        if not r.has_value():
-            return None
-        return Hit(r.value().offset, r.value().value,
-                   r.value().candidates, r.value().verified)
-
-    def find_all(self, size_t save_index=0, size_t limit=0):
-        """Every match, in increasing offset. limit=0 is unbounded.
-
-        Hit.candidates and Hit.verified accumulate across the scan: each element
-        carries the running totals as of when it was verified, so the last
-        element carries them as of the last SUCCESSFUL match -- not necessarily
-        the whole scan, if candidates were rejected after it.
-        """
-        if self._img is None:
-            raise TypeError("Primed must come from Pattern.prime(image)")
-        cdef ByteSpan sp = ByteSpan(self._img._data(), self._img.size)
-        cdef vector[Hit_t] out
-        cdef size_t i
-        with nogil:
-            out = cpp_find_all(sp, self._c, save_index, limit)
-        return [Hit(out[i].offset, out[i].value, out[i].candidates, out[i].verified)
-                for i in range(out.size())]
-
-    @property
-    def seed(self):
-        # Built eagerly in Pattern.prime(), before this Primed was published
-        # to any thread -- so this is a plain read, not a
-        # check-then-build-then-store race. See prime() for why. Still
-        # guarded: a `Primed.__new__(Primed)` from outside `Pattern.prime`
-        # never ran that construction, so `_seed` would otherwise silently
-        # read back as None instead of raising.
-        if self._img is None:
-            raise TypeError("Primed must come from Pattern.prime(image)")
-        return self._seed
 
 
 # ── maml.generate ──────────────────────────────────────────────────
@@ -539,7 +335,7 @@ cdef class Options:
     want: cython.size_t = 4
     prefer_short: cython.bint = True
     deep_anchor: cython.bint = True
-    dialect: str = "maml-current"
+    dialect: str = "maml-v1"
     nibble_wildcards: cython.bint = False
 
 
@@ -646,7 +442,7 @@ cdef vector[GenCandidate_t] _candidates_to_vec(list cands):
     cdef GenCandidate_t c
     for item in cands:
         c.pattern = item.pattern.encode("utf-8")
-        c.dialect = getattr(item,"dialect","maml-current").encode()
+        c.dialect = getattr(item,"dialect","maml-v1").encode()
         c.target_capture = getattr(item,"target_capture","").encode()
         c.save_index = <size_t>item.save_index
         c.anchor_delta = <int64_t>item.anchor_delta
@@ -723,156 +519,6 @@ def generate_resolve_consensus(Image image not None, list candidates not None):
         result.append(Resolution(address=out[i].address, anchors=anchors))
     return result
 
-
-# ── maml.pipeline ──────────────────────────────────────────────────
-#
-# The locator pipeline: compose the substrate above into a search for an
-# address ("str \"x\" -> xref -> func"). Glue for
-# include/maml/pipeline.hpp; the Python-facing names live in
-# python/maml/pipeline.py, which re-exports them under
-# `maml.pipeline` rather than the top-level namespace, the same way
-# `maml.generate` does.
-
-cdef extern from "maml/pipeline.hpp" namespace "maml::pipeline" nogil:
-    # `in` is a keyword in both Python and Cython, so the member is spelled
-    # `in_` here and mapped to the real C++ name by the quoted string.
-    cdef cppclass PipeStageResult_t "maml::pipeline::StageResult":
-        PipeStageResult_t()
-        string stage
-        size_t in_ "in"
-        size_t out
-        size_t moved
-
-    cdef cppclass PipeResult_t "maml::pipeline::PipelineResult":
-        PipeResult_t()
-        cbool ok
-        vector[uint64_t] addresses
-        vector[PipeStageResult_t] trace
-        size_t failed_stage
-        string error
-
-
-# run() is overloaded (source text, or an already-parsed program). Route
-# through a shim rather than relying on overload resolution across Cython's
-# std::string -> std::string_view conversion.
-#
-# `kind` travels through a predicate rather than as a bound enum: it is a
-# scoped enum (`enum class ResultKind`), and a bool over the wire needs no
-# Cython enum declaration to stay in step with the C++ one.
-cdef extern from * nogil:
-    """
-    #include <string>
-    #include "maml/pipeline.hpp"
-    static inline maml::pipeline::PipelineResult maml_pipeline_run(
-            const maml::generate::Image& img, const std::string& src) {
-        return maml::pipeline::run(img, std::string_view(src));
-    }
-    static inline bool maml_pipeline_is_value(
-            const maml::pipeline::PipelineResult& r) {
-        return r.kind == maml::pipeline::ResultKind::Value;
-    }
-    """
-    PipeResult_t maml_pipeline_run(const GenImage_t&, const string&) except +raise_pattern_error
-    cbool maml_pipeline_is_value(const PipeResult_t&)
-
-
-@cython.dataclasses.dataclass(frozen=True)
-cdef class StageResult:
-    """Set cardinality into and out of one stage.
-
-    `into`/`out` rather than the C++ `in`/`out`: `in` is a Python keyword.
-    """
-    stage: str
-    into: cython.size_t
-    out: cython.size_t
-
-    # Outputs that were NOT in this stage's input. On `xref` that is nearly
-    # everything and says little; on `func` it is the count of addresses
-    # REPLACED by an enclosing entry, which is how a caller sees that a
-    # mid-function target was silently collapsed to a function start.
-    moved: cython.size_t
-
-
-@cython.dataclasses.dataclass(frozen=True)
-cdef class PipelineResult:
-    """What a pipeline found, and how the set narrowed on the way.
-
-    `ok` means "ended with at least one address" -- an empty result is not an
-    error, and comes back with `error` empty and `failed_stage` None. A
-    failing `unique`, a parse error, or a stage whose substrate the Image
-    lacks sets `error`.
-
-    `trace` is not decoration. A caller that takes `addresses[0]` without
-    looking at it is making the mistake this project measured: 5-13% of
-    patterns resolving to exactly one address in a later build resolve to the
-    WRONG one, with nothing marking the answer suspect.
-
-    `failed_stage` is None when nothing failed (the C++ SIZE_MAX sentinel
-    does not travel). For `unique` it names the stage that INTRODUCED the
-    ambiguity, which is earlier than the `unique` itself -- see
-    include/maml/pipeline.hpp.
-
-    `kind` is "address" for every pipeline but one ending in `read`, which
-    yields the VALUES it loaded and reports "value". The two are not
-    interchangeable: a consumer that took a structure field displacement for
-    an address would dereference garbage, and nothing else in the result
-    would say otherwise. `addresses` carries either -- one list rather than
-    two, since every stage but the terminal one produces addresses.
-    """
-    ok: cython.bint
-    addresses: list
-    trace: list
-    failed_stage: object
-    error: str
-    kind: str
-
-    @property
-    def failed(self):
-        """Whether something went wrong, as opposed to simply finding nothing."""
-        return bool(self.error)
-
-    @property
-    def values(self):
-        """The loaded values, for a pipeline that ended in `read`.
-
-        Raises rather than returning `addresses` for an address result: the
-        point of `kind` is that reading one as the other is a mistake, and a
-        property that quietly obliged would reintroduce it.
-        """
-        if self.kind != "value":
-            raise ValueError(
-                "this pipeline produced addresses, not values; it does not "
-                "end in a `read` stage")
-        return self.addresses
-
-
-def pipeline_run(Image image not None, str source not None):
-    """Run a pipeline against `image`. Never raises for a bad pipeline.
-
-    A malformed pipeline comes back as a PipelineResult with `ok` False and
-    `error` set, so a jobfile of them can be run without a try/except per
-    line. `image.code`, `image.rodata` and `image.funcs` are the substrate;
-    a stage that needs one the Image lacks fails with a message naming it,
-    rather than quietly answering empty.
-    """
-    cdef vector[GenRange_t] code_v = _ranges_to_vec(image.code)
-    cdef vector[GenRange_t] rodata_v = _ranges_to_vec(image.rodata)
-    cdef vector[GenRange_t] funcs_v = _ranges_to_vec(image.funcs)
-    cdef GenImage_t gimg = _to_gen_image(image, code_v, rodata_v, funcs_v)
-    cdef string src = source.encode("utf-8")
-    cdef PipeResult_t out
-    with nogil:
-        out = maml_pipeline_run(gimg, src)
-    trace = [StageResult(out.trace[i].stage.decode("utf-8"),
-                         out.trace[i].in_, out.trace[i].out,
-                         out.trace[i].moved)
-             for i in range(out.trace.size())]
-    addresses = [out.addresses[i] for i in range(out.addresses.size())]
-    failed_stage = None if out.failed_stage == SIZE_MAX else out.failed_stage
-    return PipelineResult(ok=out.ok, addresses=addresses, trace=trace,
-                          failed_stage=failed_stage,
-                          error=out.error.decode("utf-8"),
-                          kind="value" if maml_pipeline_is_value(out) else "address")
 
 # Semantic dialect shares the installed native extension.
 include "_v1.pxi"

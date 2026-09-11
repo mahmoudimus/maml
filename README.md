@@ -5,10 +5,9 @@ matching language.
 Patterns describe bytes, gaps, captures, and references. Pipelines transform
 matches and address sets. Cursor-machine mechanics stay below compilation.
 
-**Status:** the semantic v1 frontend is implemented in C++ and exposed through
-Cython, Python, and the scanner/pipeline CLIs. Select it explicitly with
-`maml::v1`, `maml.v1`, or `--dialect maml-v1`. Existing unversioned APIs and
-commands keep their current grammar; there is no automatic syntax detection.
+**Status:** v1 is the language. Patterns, pipelines, generation, and the CLIs
+use `maml::v1` / `maml.Pattern` / `maml.Pipeline`. There is no unversioned
+dialect and no `--dialect` switch.
 
 ```text
 E8 rel32(callee) [3..5] 4C 8B D0 48 85 C0 74 ??
@@ -24,7 +23,7 @@ E8 rel32(callee):follow 48 89 5C 24 ??
 Pipeline composition uses `->`:
 
 ```text
-str("GetActivePlayerObj")
+str("SomeStringAnchor")
     -> xrefs
     -> func
     -> find("E8 rel32(init) [3..5] 48 85 C0")
@@ -172,7 +171,7 @@ Python uses a triple-quoted string to preserve the newlines:
 from maml import v1
 
 query = v1.Pipeline("""
-    str("GetActivePlayerObj")
+    str("SomeStringAnchor")
         -> xrefs
         -> func:loose
         -> find("E8 rel32(init) [3..5] 48 85 C0")
@@ -189,7 +188,7 @@ quoted function arguments to appear unchanged:
 #include <maml/v1_pipeline.hpp>
 
 const auto query = maml::v1::Pipeline(R"pipeline(
-    str("GetActivePlayerObj")
+    str("SomeStringAnchor")
         -> xrefs
         -> func:loose
         -> find("E8 rel32(init) [3..5] 48 85 C0")
@@ -206,7 +205,7 @@ from maml import v1
 
 query = (
     v1.PipelineBuilder()
-    .str("GetActivePlayerObj")
+    .str("SomeStringAnchor")
     .xrefs()
     .func(strict=False)
     .find("E8 rel32(init) [3..5] 48 85 C0")
@@ -223,7 +222,7 @@ The equivalent C++ builder:
 #include <maml/v1_pipeline.hpp>
 
 const auto query = maml::v1::PipelineBuilder()
-    .str("GetActivePlayerObj")
+    .str("SomeStringAnchor")
     .xrefs()
     .func(maml::v1::FunctionMode::Loose)
     .find("E8 rel32(init) [3..5] 48 85 C0")
@@ -245,10 +244,10 @@ and metadata requirements are identical to textual pipelines.
 ### V1 command-line examples
 
 ```sh
-mamlscan --dialect maml-v1 image.bin 'E8 rel32(callee):follow CC' --capture callee
-mamlpipe --dialect maml-v1 image.bin --ranges ranges.txt \
+mamlscan image.bin 'E8 rel32(callee):follow CC' --capture callee
+mamlpipe image.bin --ranges ranges.txt \
     'bytes("E8 rel32(callee)") -> capture("callee") -> unique'
-mamlpipe --dialect maml-v1 --batch pipelines.tsv --image image.bin --ranges ranges.txt
+mamlpipe --batch pipelines.tsv --image image.bin --ranges ranges.txt
 python tools/check_conformance.py --adapter python -m maml.v1_adapter
 ```
 
@@ -288,14 +287,12 @@ budget passed to `match_at`. There is no wall-clock or whole-scan time guarantee
 
 `v1.generate` emits semantic patterns, verifies them in both supplied builds,
 and can infer nibble masks; see [semantic generation](#semantic-generation-and-nibble-masks).
-The unversioned generator keeps its own grammar. Portable compiled-pattern
-persistence is not implemented; retain source and its dialect identifier.
+Portable compiled-pattern persistence is not implemented; retain source text.
 
-## Current runtime language
+## Legacy byte grammar
 
-The unversioned `maml.Pattern`, generator, and pipeline APIs use this grammar.
-CLI commands use it unless `--dialect maml-v1` is specified. Select the
-[v1 frontend](#using-maml-v1) for function-call spellings and named captures.
+The old unversioned `?` / `$ { ' }` grammar is gone. v1 is the only dialect;
+`??` is one wildcard byte, and references use `rel32(name)`.
 
 | Syntax | Current behavior |
 | --- | --- |
@@ -344,7 +341,7 @@ sorts and deduplicates its output; positional selection is ascending address
 order, not discovery order.
 
 ```text
-str "GetActivePlayerObj" -> xref -> func -> unique
+str "SomeStringAnchor" -> xref -> func -> unique
 bytes "48 89 5C 24 08 57" -> func -> callers -> nth 0
 ```
 
@@ -446,30 +443,23 @@ function ranges. Check errors when those ranges are absent.
 In C++, include the pipeline header explicitly:
 
 ```cpp
-#include <maml/pipeline.hpp>
+#include <maml/v1_pipeline.hpp>
 #include <array>
 
 int main() {
     const std::array<uint8_t, 8> bytes{0x90, 0xF7, 0x80, 0x58, 0x1C, 0, 0, 0x90};
     const std::array<maml::generate::Range, 1> funcs{{{0, 8}}};
-    const maml::generate::Image img{bytes, funcs, {}, funcs};
-    const auto r = maml::pipeline::run(img,
-        "bytes \"F7 80\" -> func -> find \"F7 80 ' ? ? 00 00\" -> read 4");
-    return r.ok && r.kind == maml::pipeline::ResultKind::Value &&
-           r.addresses == std::vector<uint64_t>{0x1C58} ? 0 : 1;
+    maml::v1::Image image{bytes};
+    const auto r = maml::v1::Pipeline(
+        "bytes(\"F7 80\") -> func -> find(\"F7 80 @(x) ?? ?? 00 00\") -> read(4)")
+        .run(image, funcs, {}, funcs);
+    return r.ok() && !r.is_matches && r.values.size() == 1 &&
+           r.values[0].value == 0x1C58 ? 0 : 1;
 }
 ```
 
-For repeated C++ pipelines on the same image, `maml::pipeline::Session` reuses
-the derived indexes. Call `preload_string_targets()` before a collection of
-string-based jobs to index their references together. Keep the backing bytes
-and ranges alive and unchanged for the session.
-
-For the v1 spelling, `str "text"` becomes `str("text")`, `xref` becomes `xrefs`,
-and arguments such as `nth 0` become `nth(0)`. The more important change is
-`find(...) -> capture("name")`: v1 returns matches first and projects explicitly.
-Those spellings are accepted by the explicit v1 frontend; they are not aliases
-in the unversioned parser.
+v1 pipeline spelling uses `str("text")`, `xrefs`, and `nth(0)`. `find(...) -> capture("name")`
+returns matches first and projects named captures explicitly.
 
 ### mamlpipe CLI and range manifests
 
@@ -500,35 +490,26 @@ all requested pipelines ended with at least one result and no errors.
 
 ## Current scanning APIs and mamlscan
 
-Python `Pattern` compiles once without an image. `prime(image)` chooses a seed
-for that particular pattern/image pair; reuse the primed object for repeated
-searches, but prime separately for each image.
+Python `Pattern` compiles once and searches an `Image` with `find` / `find_all`.
 
 ```python
 from maml import Image, Pattern
 
 img = Image.from_bytes(bytes.fromhex("90 48 8B C4 90"))
-scan = Pattern("48 8B C4").prime(img)
-hit = scan.find()
-assert hit.offset == 1 and hit.value == 1
-assert len(scan.find_all(limit=2)) == 1
+hits = Pattern("48 8B C4").find_all(img, limit=2)
+assert hits[0].offset == 1
 ```
 
 `find()` returns the first match, not a uniqueness assertion. Use
 `find_all(limit=2)` and require exactly one result when uniqueness matters.
-Use `save_index=1` to retrieve the first positional capture instead of slot zero.
-`Hit.offset` still identifies the match site; `Hit.value` is the selected slot.
-`candidates` counts seed candidates examined and `verified` counts candidates
-sent to the full matcher after fixed-byte filtering. These are search-work
-counters, not proof of a correct target or a performance improvement.
+Named captures use `rel32(name)` / `@(name)` and are read with `Match.capture`.
 
-Invalid patterns raise `PatternError` with `kind`, `start`, and `end` identifying
-the parser error and source span. C++ exposes `ParseException`; use
-`maml::locate::compile`, `prime`, `find`, and `find_all` for reusable scanning.
+Invalid patterns raise `CompileError` with `code` and `position`. C++ throws
+`maml::v1::Error`. Scan with `v1::Pattern::find_all`.
 
 ```sh
 mamlscan flat.bin '48 8B C4' --expect 1
-mamlscan flat.bin "E8 $ { ' }" --save-index 1 --limit 2
+mamlscan flat.bin "E8 rel32(target)" --capture target --limit 2
 mamlscan --batch scans.tsv
 ```
 
@@ -915,14 +896,14 @@ C++ consumers link `maml::maml`, using either `add_subdirectory(maml)` or
 `find_package(maml CONFIG REQUIRED)` after `cmake --install build --prefix ...`:
 
 ```cpp
-#include <maml.hpp>
+#include <maml/v1.hpp>
 #include <maml/generate.hpp>
 #include <array>
 
 int main() {
     const std::array<unsigned char, 5> image{0x90, 0x48, 0x8B, 0xC4, 0x90};
-    auto hit = maml::locate::find(image, "48 8B C4");
-    return hit && hit->offset == 1 ? 0 : 1;
+    auto hits = maml::v1::Pattern("48 8B C4").find_all(maml::v1::Image{image}, 2);
+    return !hits.empty() && hits[0].offset == 1 ? 0 : 1;
 }
 ```
 
@@ -938,7 +919,7 @@ outside the source tree. GitHub workflows cover C++, Python, and wheel builds;
 local checks do not establish remote CI success.
 
 Releases are tag-driven: bump the version in `pyproject.toml`, `CMakeLists.txt`,
-and `include/maml/maml.hpp` (the Python `__version__` is derived from the C++
+and `include/maml/version.hpp` (the Python `__version__` is derived from the C++
 macros), move the `[Unreleased]` notes in `CHANGELOG.md` into a version
 section, then push a `vX.Y.Z` tag. `.github/workflows/deploy.yml` builds through
 `wheels.yml` and publishes the `maml-python` distribution to PyPI with trusted
@@ -953,10 +934,10 @@ MAML is the top-level project and disabled when embedded with `add_subdirectory`
 | Path | Purpose |
 | --- | --- |
 | `include/maml.hpp` | Public umbrella header |
-| `include/maml/maml.hpp` | Pattern parser and matching engine |
+| `include/maml/v1.hpp` | v1 pattern parser and matching engine |
 | `include/maml/mamlscan.hpp` | Reusable scanner, seed selection, and filtering |
 | `include/maml/generate.hpp` | Generation, cross-image verification, and consensus |
-| `include/maml/pipeline.hpp` | Locator pipeline parser and execution |
+| `include/maml/v1_pipeline.hpp` | Locator pipeline parser and execution |
 | `python/maml/` | Cython extension and Python interfaces |
 | `tools/` | Scanner, pipeline, benchmark, build, and package verification tools |
 | `tools/durability/` | Cross-build measurement and resolution tools |

@@ -6,7 +6,8 @@
 namespace maml::v1 {
     struct Trace {
         std::string stage;
-        size_t into = 0, out = 0;
+        size_t into = 0;
+        size_t out = 0;
     };
     struct PipelineResult {
         bool is_matches = false;

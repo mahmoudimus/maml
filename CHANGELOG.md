@@ -4,6 +4,13 @@ All notable user-visible changes to this project are documented here. The format
 
 ## [Unreleased]
 
+### Removed
+
+- **The unversioned pattern and pipeline dialect is gone.** `maml.Pattern`,
+  `maml.Pipeline`, `mamlscan`, and `mamlpipe` are v1 only. There is no
+  `--dialect` switch. Pipelines use `str("text")` / `xrefs`, not `str "text"`
+  / `xref`.
+
 ## [0.1.0] - 2026-09-11
 
 ### Added

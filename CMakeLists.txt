@@ -32,7 +32,7 @@ option(MAML_BUILD_TESTS "Build tests" ${MAML_MAIN_PROJECT})
 option(MAML_BUILD_TOOLS "Build the mamlscan CLI" ${MAML_MAIN_PROJECT})
 
 # ── the library ────────────────────────────────────────────────────────
-# Header-only. Consumers include <maml/maml.hpp> and
+# Header-only. Consumers include <maml/v1.hpp> and
 # <maml/mamlscan.hpp>, or <maml.hpp> for both.
 
 add_library(maml INTERFACE)
@@ -70,8 +70,6 @@ if(MAML_BUILD_TOOLS)
     target_link_libraries(maml.durability.measure PRIVATE maml)
     add_executable(maml.durability.resolve tools/durability/resolve.cpp)
     target_link_libraries(maml.durability.resolve PRIVATE maml)
-    add_executable(maml.durability.pipeline tools/durability/pipeline_survival.cpp)
-    target_link_libraries(maml.durability.pipeline PRIVATE maml)
     if(NOT MSVC)
         target_compile_options(mamlscan PRIVATE -O2)
         target_compile_options(mamlpipe PRIVATE -O2)
@@ -91,14 +89,9 @@ if(MAML_BUILD_TESTS)
 
     add_executable(maml_tests
         tests/main.cpp
-        tests/test_maml.cpp
-        tests/test_patterns.cpp
-        tests/test_seed_selection.cpp
         tests/test_generate.cpp
-        tests/test_pipeline.cpp
         tests/test_simd_backend.cpp
         tests/test_v1.cpp
-        tests/test_sigils.cpp
     )
     target_link_libraries(maml_tests PRIVATE maml catch2_vendored)
     if(NOT MSVC)

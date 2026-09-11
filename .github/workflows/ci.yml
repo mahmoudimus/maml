@@ -174,10 +174,8 @@ jobs:
         #include <array>
         int main() {
             std::array<unsigned char, 4> img{0x4C, 0x8B, 0xD0, 0x90};
-            auto hit = maml::locate::find(
-                std::span<const unsigned char>(img.data(), img.size()),
-                "4C 8B D0");
-            return hit ? 0 : 1;
+            auto hits = maml::v1::Pattern("4C 8B D0").find_all(maml::v1::Image{img}, 2);
+            return hits.empty() ? 1 : 0;
         }
         EOC
         cmake -S /tmp/consumer -B /tmp/consumer/build

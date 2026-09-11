@@ -14,7 +14,6 @@
 //     name <TAB> OK|MISS|MULTI|NONE|ERR <TAB> hits <TAB> rva[,rva...] <TAB> detail
 #include "maml/mamlscan.hpp"
 #include "maml/v1.hpp"
-#include "maml/maml.hpp"
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -46,31 +45,31 @@ struct Scan {
     std::string detail;
 };
 
-// save_index selects which saved cursor is the answer: 0 is the match offset
-// itself, 1 the first `'` capture, and so on.
+// save_index 0 is the match offset; 1+ indexes named captures in schema order.
 Scan scan(const std::vector<uint8_t>& img, const std::string& pattern,
     size_t save_index, size_t limit) {
     Scan out;
-    OwnedBinaryPattern pat;
     try {
-        pat = compiler::optimize_pattern(compiler::parse_pattern(pattern));
+        const v1::Pattern pat(pattern);
+        for (const auto& hit : pat.find_all(v1::Image{ img }, limit + 1)) {
+            uint64_t rva = hit.offset;
+            if (save_index != 0) {
+                if (save_index > hit.captures.size()) {
+                    out.status = "ERR";
+                    out.detail = "save index " + std::to_string(save_index) +
+                                 " but only " + std::to_string(hit.captures.size()) + " saved";
+                    return out;
+                }
+                rva = hit.captures[save_index - 1].data.value;
+            }
+            out.rvas.push_back(rva);
+            if (out.rvas.size() > limit)
+                break;
+        }
     } catch (const std::exception& e) {
         out.status = "ERR";
         out.detail = e.what();
         return out;
-    }
-    const SpanMatchTarget target(std::span<const uint8_t>(img.data(), img.size()));
-    BinaryMatcher<> m(pat, target);
-    while (auto hit = m.next_match()) {
-        if (hit->size() <= save_index) {
-            out.status = "ERR";
-            out.detail = "save index " + std::to_string(save_index) +
-                         " but only " + std::to_string(hit->size()) + " saved";
-            return out;
-        }
-        out.rvas.push_back((*hit)[save_index]);
-        if (out.rvas.size() > limit)
-            break;
     }
     return out;
 }
@@ -151,10 +150,6 @@ int run_batch(const char* jobfile) {
     return 0;
 }
 
-// --scan uses maml::locate::find -- the same seed-then-refine the DLL
-// calls through FC::FindPatternBM. Validating that path here means the thing
-// measured and the thing shipped are the same code, not two copies kept in
-// step by eye.
 int run_scan(const char* image, const char* jobfile) {
     std::vector<uint8_t> img = load(image);
     if (img.empty()) {
@@ -170,31 +165,32 @@ int run_scan(const char* image, const char* jobfile) {
         const size_t b = line.find('\t', a + 1);
         const std::string name = line.substr(0, a);
         const size_t save = strtoul(line.substr(a + 1, b - a - 1).c_str(), nullptr, 10);
-        // Optional 4th field: "<seed-offset>:<hex bytes>" -- the seed chosen
-        // offline. Passing it skips selection, which is what the DLL does.
         const std::string rest = line.substr(b + 1);
         std::string pat = rest;
-        maml::locate::Seed seed;
         const size_t c = rest.find('\t');
-        if (c != std::string::npos) {
+        if (c != std::string::npos)
             pat = rest.substr(0, c);
-            const std::string sd = rest.substr(c + 1);
-            const size_t colon = sd.find(':');
-            if (colon != std::string::npos) {
-                seed.offset = strtoul(sd.substr(0, colon).c_str(), nullptr, 10);
-                const std::string hex = sd.substr(colon + 1);
-                for (size_t k = 0; k + 1 < hex.size(); k += 2)
-                    seed.bytes.push_back((uint8_t)strtoul(hex.substr(k, 2).c_str(), nullptr, 16));
+        try {
+            const v1::Pattern pattern(pat);
+            auto hits = pattern.find_all(v1::Image{ img }, 2);
+            if (hits.empty()) {
+                printf("%s\tNONE\t0\t0\t0\n", name.c_str());
+            } else {
+                uint64_t rva = hits[0].offset;
+                if (save != 0) {
+                    if (save > hits[0].captures.size()) {
+                        printf("%s\tERR\t0\t0\t0\n", name.c_str());
+                        fflush(stdout);
+                        continue;
+                    }
+                    rva = hits[0].captures[save - 1].data.value;
+                }
+                printf("%s\tOK\t%llx\t%zu\t%zu\n", name.c_str(),
+                    (unsigned long long)rva, hits.size(), hits.size());
             }
+        } catch (const std::exception&) {
+            printf("%s\tERR\t0\t0\t0\n", name.c_str());
         }
-        auto hit = maml::locate::find(
-            std::span<const uint8_t>(img.data(), img.size()), pat, save,
-            seed.ok() ? &seed : nullptr);
-        if (hit)
-            printf("%s\tOK\t%llx\t%zu\t%zu\n", name.c_str(),
-                (unsigned long long)hit->value, hit->candidates, hit->verified);
-        else
-            printf("%s\tNONE\t0\t0\t0\n", name.c_str());
         fflush(stdout);
     }
     return 0;
@@ -203,7 +199,7 @@ int run_scan(const char* image, const char* jobfile) {
 // Explicit dialect selection keeps identical byte spellings unambiguous.
 int run_v1(const std::vector<std::string>& args) {
     if (args.size() < 2) {
-        fprintf(stderr, "usage: mamlscan --dialect maml-v1 <image> <pattern> [--capture NAME] [--limit N] [--expect HEX]\n");
+        fprintf(stderr, "usage: mamlscan <image> <pattern> [--capture NAME] [--limit N] [--expect HEX]\n");
         return 2;
     }
     try {
@@ -260,55 +256,20 @@ int run_v1(const std::vector<std::string>& args) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::vector<std::string> semantic_args;
-    bool semantic = false;
+    std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--dialect") == 0) {
-            if (semantic || i + 1 == argc || strcmp(argv[++i], "maml-v1") != 0) {
-                fprintf(stderr, "Expected exactly one --dialect maml-v1\n");
+            if (i + 1 == argc || strcmp(argv[++i], "maml-v1") != 0) {
+                fprintf(stderr, "Unknown dialect; MAML is v1 only\n");
                 return 2;
             }
-            semantic = true;
-        } else
-            semantic_args.emplace_back(argv[i]);
+            continue;
+        }
+        args.emplace_back(argv[i]);
     }
-    if (semantic)
-        return run_v1(semantic_args);
-
-    if (argc >= 4 && strcmp(argv[1], "--scan") == 0)
-        return run_scan(argv[2], argv[3]);
-    if (argc >= 3 && strcmp(argv[1], "--batch") == 0)
-        return run_batch(argv[2]);
-    if (argc < 3) {
-        fprintf(stderr,
-            "usage: mamlscan <image> <pattern> [--limit N] [--expect RVA] [--save-index K]\n"
-            "       mamlscan --batch <jobfile>\n"
-            "       mamlscan --dialect maml-v1 <image> <pattern> [--capture NAME] [--limit N] [--expect HEX]\n");
-        return 2;
-    }
-    const std::string path = argv[1];
-    const std::string pattern = argv[2];
-    size_t limit = 32;
-    size_t save_index = 0;
-    bool have_expect = false;
-    uint64_t expect = 0;
-    for (int i = 3; i < argc - 1; ++i) {
-        if (!strcmp(argv[i], "--limit"))
-            limit = strtoul(argv[++i], nullptr, 0);
-        else if (!strcmp(argv[i], "--expect")) {
-            expect = strtoull(argv[++i], nullptr, 16);
-            have_expect = true;
-        } else if (!strcmp(argv[i], "--save-index"))
-            save_index = strtoul(argv[++i], nullptr, 0);
-    }
-    auto img = load(path);
-    if (img.empty()) {
-        fprintf(stderr, "cannot read %s\n", path.c_str());
-        return 2;
-    }
-    Scan s = scan(img, pattern, save_index, limit);
-    classify(s, have_expect, expect);
-    printf("%s hits=%zu %s%s\n", s.status.c_str(), s.rvas.size(),
-        join(s.rvas, limit).c_str(), s.detail.empty() ? "" : (" " + s.detail).c_str());
-    return s.status == "OK" ? 0 : 1;
+    if (args.size() >= 2 && args[0] == "--batch")
+        return run_batch(args[1].c_str());
+    if (args.size() >= 3 && args[0] == "--scan")
+        return run_scan(args[1].c_str(), args[2].c_str());
+    return run_v1(args);
 }

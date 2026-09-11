@@ -86,7 +86,7 @@ namespace maml {
             // generating for thousands of targets against a 137MB image may
             // want it off; the anchors it then gets are worse, not wrong.
             bool deep_anchor = true;
-            std::string dialect = "maml-current";
+            std::string dialect = "maml-v1";
             bool nibble_wildcards = false;
         };
 
@@ -158,7 +158,7 @@ namespace maml {
             Strategy strategy = Strategy::Body;
             size_t literals = 0;
             locate::Seed seed;        // rarest run, already chosen
-            std::string dialect = "maml-current";
+            std::string dialect = "maml-v1";
             std::string target_capture;
         };
 
@@ -716,25 +716,13 @@ namespace maml {
             // easier to reason about than one per shape.
             inline size_t shortest_unique_tail(std::span<const uint8_t> img,
                 const std::string& head, const uint8_t* tail, size_t full,
-                size_t save_index, bool semantic = false) {
+                size_t save_index) {
                 auto unique_at = [&](size_t len) {
-                    if (semantic)
-                        return v1::Pattern(head + hex_bytes(tail, len)).find_all(v1::Image{ img }, 2).size() == 1;
-                    locate::Compiled comp;
-                    // compile() throws only on a malformed pattern; the
-                    // heads here are the emitters' own, so this is the same
-                    // unreachable guard resolves_uniquely carries.
                     try {
-                        comp = locate::compile(head + hex_bytes(tail, len));
+                        return v1::Pattern(head + hex_bytes(tail, len)).find_all(v1::Image{ img }, 2).size() == 1;
                     } catch (...) {
                         return false;
                     }
-                    locate::prime(comp, img);
-                    // save_index matters to the COUNT, not just to what is
-                    // reported: find_all drops a match whose save slot does
-                    // not exist. Asking with the candidate's own index is
-                    // what makes this test agree with resolves_uniquely.
-                    return locate::find_all(img, comp, save_index, 2).size() == 1;
                 };
                 if (full <= kMinLiteralRun || !unique_at(full))
                     return full;
@@ -836,17 +824,14 @@ namespace maml {
         // Task 10's, not candidates()'s.
         inline std::vector<Candidate> candidates(const Image& img, uint64_t target,
             const Options& opt = {}) {
-            if (opt.dialect != "maml-current" && opt.dialect != "maml-v1")
+            if (opt.dialect != "maml-v1")
                 throw v1::Error("InvalidArgument", "Unknown generator dialect");
-            const bool semantic = opt.dialect == "maml-v1";
-            if (opt.nibble_wildcards && !semantic)
+            if (opt.nibble_wildcards && opt.dialect != "maml-v1")
                 throw v1::Error("InvalidArgument", "Nibble generation requires maml-v1");
             std::vector<Candidate> out;
             const size_t n = img.bytes.size();
             auto seed_for = [&](const std::string& pattern) {
-                if (semantic)
-                    return v1::Pattern(pattern).select_seed(img.bytes);
-                return locate::select_seed(img.bytes, locate::fixed_bytes(pattern));
+                return v1::Pattern(pattern).select_seed(img.bytes);
             };
 
             // `want` <= 0 asks for nothing, and every loop below would
@@ -872,7 +857,7 @@ namespace maml {
             std::vector<Key> seen;
             auto emit = [&](Bucket b, Candidate&& c) {
                 c.dialect = opt.dialect;
-                if (semantic && c.save_index) {
+                if (c.save_index) {
                     c.target_capture = "target";
                     c.save_index = 0;
                 }
@@ -900,10 +885,10 @@ namespace maml {
                 // The tail is a trailing literal run with nothing behind it,
                 // so shortening it cannot starve a later atom -- the `'` is
                 // filled by the `E8 $ { ' }` in front.
-                const std::string kXrefHead = semantic ? "E8 rel32(target) " : "E8 $ { ' } ";
+                const std::string kXrefHead = "E8 rel32(target) ";
                 if (opt.prefer_short)
                     take = detail::shortest_unique_tail(img.bytes, kXrefHead,
-                        img.bytes.data() + after, take, 1, semantic);
+                        img.bytes.data() + after, take, 1);
 
                 Candidate c;
                 c.strategy = Strategy::Xref;
@@ -1007,13 +992,7 @@ namespace maml {
 
                         bool distinctive = false;
                         try {
-                            if (semantic)
-                                distinctive = v1::Pattern(c.pattern).find_all(v1::Image{ img.bytes }, 2).size() == 1;
-                            else {
-                                auto comp = locate::compile(c.pattern);
-                                locate::prime(comp, img.bytes);
-                                distinctive = locate::find_all(img.bytes, comp, 0, 2).size() == 1;
-                            }
+                            distinctive = v1::Pattern(c.pattern).find_all(v1::Image{ img.bytes }, 2).size() == 1;
                         } catch (...) {
                             distinctive = false;
                         }
@@ -1026,7 +1005,7 @@ namespace maml {
                             // unique, which is the bisection's precondition.
                             if (opt.prefer_short) {
                                 const size_t keep = detail::shortest_unique_tail(
-                                    img.bytes, "", img.bytes.data() + anchor, take, 0, semantic);
+                                    img.bytes, "", img.bytes.data() + anchor, take, 0);
                                 c.literals = keep;
                                 c.pattern = hex_bytes(img.bytes.data() + anchor, keep);
                             }
@@ -1152,7 +1131,7 @@ namespace maml {
                     // from the second, which is the entire premise of the
                     // library failing quietly.
                     const std::string lea =
-                        hex_bytes(base + site, 3) + (semantic ? " ?? ?? ?? ??" : " ? ? ? ?");
+                        hex_bytes(base + site, 3) + " ?? ?? ?? ??";
 
                     const bool at_target = target_fn && site >= target_fn->begin && site < target_fn->end;
                     const int depth = at_target ? 0 : 1;
@@ -1182,7 +1161,7 @@ namespace maml {
                         // may shorten it.
                         if (opt.prefer_short)
                             take = detail::shortest_unique_tail(img.bytes, lea + " ",
-                                base + after, take, 0, semantic);
+                                base + after, take, 0);
 
                         Candidate c;
                         c.strategy = Strategy::StringAnchor;
@@ -1246,7 +1225,7 @@ namespace maml {
                     c.pattern = lea;
                     if (gap)
                         c.pattern += " " + hex_bytes(base + after, gap);
-                    c.pattern += semantic ? " E8 rel32(target)" : " E8 $ { ' }";
+                    c.pattern += " E8 rel32(target)";
 
                     c.seed = seed_for(c.pattern);
                     emit(kStringAnchor, std::move(c));
@@ -1317,17 +1296,10 @@ namespace maml {
                     const size_t head_len = f.opcode_len + 1u; // opcode bytes plus the modrm
 
                     std::string head = hex_bytes(base + ref.site, head_len);
-                    if (semantic) {
-                        head += " rel32(target";
-                        if (f.imm_width)
-                            head += ", target_add=" + std::to_string(f.imm_width);
-                        head += ")";
-                    } else {
-                        head += " $ { ";
-                        if (f.imm_width)
-                            head += "[" + std::to_string(f.imm_width) + "] ";
-                        head += "' }";
-                    }
+                    head += " rel32(target";
+                    if (f.imm_width)
+                        head += ", target_add=" + std::to_string(f.imm_width);
+                    head += ")";
 
                     // Past the disp32, which is where `}` leaves the cursor.
                     const uint64_t after = ref.site + f.disp_off + 4u;
@@ -1337,7 +1309,7 @@ namespace maml {
                         take = clamp_to_func(img, after, take);
                         if (take && opt.prefer_short)
                             take = detail::shortest_unique_tail(img.bytes, head + " ",
-                                base + after, take, 1, semantic);
+                                base + after, take, 1);
                     }
 
                     // No room for context leaves the bare `48 8B 0D $ { ' }`
@@ -1423,44 +1395,9 @@ namespace maml {
 
             inline bool resolves_uniquely(std::span<const uint8_t> img,
                 const Candidate& c, uint64_t want) {
-                if (c.dialect == "maml-v1")
-                    return resolve_semantic(img, c) == want;
-                if (c.dialect != "maml-current")
+                if (c.dialect != "maml-v1")
                     throw v1::Error("InvalidArgument", "Unknown candidate dialect");
-                locate::Compiled comp;
-                // compile() can throw on a malformed pattern; the patterns
-                // candidates() builds always parse, so this is unreachable
-                // today and exists for a caller that constructs a Candidate
-                // by hand. prime() and find_all() are deliberately left
-                // outside the try: the matcher's scan path cannot throw
-                // anything but bad_alloc -- every throw site is in the
-                // parser (established in Phase 1).
-                try {
-                    comp = locate::compile(c.pattern);
-                } catch (...) {
-                    return false;
-                }
-                locate::prime(comp, img);
-                const auto hits = locate::find_all(img, comp, c.save_index, 2);
-                if (hits.size() != 1)
-                    return false;
-                // A capture-bearing candidate reads its target from the SAVE
-                // SLOT; one without a capture recovers it from the match
-                // position, minus the delta. Comparing a Body match directly
-                // against the target is the failure CLAUDE.md records twice.
-                //
-                // The test is on save_index, not on the strategy enum. Xref is
-                // no longer the only capturing strategy -- StringAnchor's
-                // depth-1 form ends in the same `E8 $ { ' }` and carries
-                // save_index 1 -- and keying on the enum silently rejected
-                // every one of those as resolving to its own match offset.
-                // save_index 0 IS the match offset (slot 0 is where the pattern
-                // matched), so the two branches stay exactly as they were for
-                // Xref and Body.
-                const uint64_t got = c.save_index != 0
-                    ? hits[0].value
-                    : (uint64_t)((int64_t)hits[0].offset - c.anchor_delta);
-                return got == want;
+                return resolve_semantic(img, c) == want;
             }
 
         } // namespace detail
@@ -1530,28 +1467,12 @@ namespace maml {
             for (size_t i = 0; i < cands.size(); ++i) {
                 const Candidate& c = cands[i];
                 uint64_t got;
-                if (c.dialect == "maml-v1") {
-                    auto resolved = detail::resolve_semantic(image, c);
-                    if (!resolved)
-                        continue;
-                    got = *resolved;
-                } else {
-                    if (c.dialect != "maml-current")
-                        throw v1::Error("InvalidArgument", "Unknown candidate dialect");
-                    auto comp = locate::compile(c.pattern);
-                    locate::prime(comp, image);
-                    // limit 2: an anchor matching more than once has told us
-                    // nothing, and enumerating the rest of a 133MB image to learn
-                    // that is pure cost. Such an anchor does not get to vote --
-                    // otherwise ambiguity would inflate a consensus instead of
-                    // being excluded from it.
-                    const auto hits = locate::find_all(image, comp, c.save_index, 2);
-                    if (hits.size() != 1)
-                        continue;
-                    got = c.save_index != 0
-                              ? hits[0].value
-                              : (uint64_t)((int64_t)hits[0].offset - c.anchor_delta);
-                }
+                if (c.dialect != "maml-v1")
+                    throw v1::Error("InvalidArgument", "Unknown candidate dialect");
+                auto resolved = detail::resolve_semantic(image, c);
+                if (!resolved)
+                    continue;
+                got = *resolved;
                 auto it = std::find_if(out.begin(), out.end(),
                     [&](const Resolution& r) { return r.address == got; });
                 if (it == out.end())

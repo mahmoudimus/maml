@@ -52,19 +52,20 @@ static Build load(const std::string& tag) {
     return b;
 }
 
-// The resolution rule resolves_uniquely uses: read the capture slot when the
-// pattern captures, otherwise subtract the anchor delta from the match.
 static bool resolve(const Build& b, const generate::Candidate& c,
                     uint64_t* out, size_t* nhits) {
-    auto comp = locate::compile(c.pattern);
-    locate::prime(comp, b.bytes);
-    const auto h = locate::find_all(b.bytes, comp, c.save_index, 2);
-    *nhits = h.size();
-    if (h.size() != 1)
+    try {
+        auto matches = v1::Pattern(c.pattern).find_all(v1::Image{ b.bytes }, 2);
+        *nhits = matches.size();
+        auto got = generate::detail::resolve_semantic(b.bytes, c);
+        if (!got || matches.size() != 1)
+            return false;
+        *out = *got;
+        return true;
+    } catch (...) {
+        *nhits = 0;
         return false;
-    *out = c.save_index != 0 ? h[0].value
-                             : (uint64_t)((int64_t)h[0].offset - c.anchor_delta);
-    return true;
+    }
 }
 
 int main(int argc, char** argv) {

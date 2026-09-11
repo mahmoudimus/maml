@@ -1,6 +1,6 @@
 import pytest
 
-import maml
+from maml import _core
 
 lief = pytest.importorskip("lief", reason="needs the maml[pe] extra")
 
@@ -37,13 +37,13 @@ def _build_pe(tmp_path):
 
 
 def test_a_flat_image_has_no_sections():
-    assert maml.Image.from_bytes(b"\x90" * 16).sections == []
+    assert _core.Image.from_bytes(b"\x90" * 16).sections == []
 
 
 def test_from_pe_flattens_sections_to_rvas(tmp_path):
     out = _build_pe(tmp_path)
 
-    img = maml.Image.from_pe(str(out))
+    img = _core.Image.from_pe(str(out))
     assert img.size > 0x1000              # section placed at its virtual address
     names = [s.name for s in img.sections]
     assert ".text" in names
@@ -56,4 +56,4 @@ def test_from_pe_raises_cleanly_on_a_non_pe(tmp_path):
     p = tmp_path / "not.exe"
     p.write_bytes(b"not a PE at all")
     with pytest.raises(ValueError):
-        maml.Image.from_pe(str(p))
+        _core.Image.from_pe(str(p))

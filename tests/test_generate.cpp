@@ -1,6 +1,6 @@
 // The generator: given a target in two builds, emit patterns unique in both.
 #include "catch.hpp"
-#include "maml.hpp"
+#include "maml/v1.hpp"
 #include "maml/generate.hpp"
 #include <algorithm>
 #include <set>
@@ -8,6 +8,12 @@
 #include <chrono>
 #include <vector>
 using namespace maml;
+
+static uint64_t match_target(const v1::Match& m) {
+    if (!m.captures.empty())
+        return m.captures.front().data.value;
+    return m.offset;
+}
 
 TEST_CASE("the generate surface is callable, and Body emits from any address", "[generate]") {
     std::vector<uint8_t> bytes(0x100, 0xCC);
@@ -199,9 +205,10 @@ TEST_CASE("Xref emits one candidate per call site", "[generate][xref]") {
         if (c.strategy != generate::Strategy::Xref)
             continue;
         ++xref_count;
-        REQUIRE(c.save_index == 1);          // the `'` capture holds the callee
+        REQUIRE(c.save_index == 0);
+    REQUIRE(c.target_capture == "target");          // the `'` capture holds the callee
         REQUIRE(c.anchor_delta == 0);        // target comes from the slot, not the match
-        REQUIRE(c.pattern.rfind("E8 $ { ' }", 0) == 0);
+        REQUIRE(c.pattern.rfind("E8 rel32(target)", 0) == 0);
     }
     REQUIRE(xref_count == 2);
 }
@@ -222,11 +229,9 @@ TEST_CASE("an Xref candidate actually resolves to its target", "[generate][xref]
     });
     REQUIRE(it != cs.end());
 
-    auto comp = locate::compile(it->pattern);
-    locate::prime(comp, bytes);
-    auto hits = locate::find_all(bytes, comp, it->save_index, 2);
+    auto hits = v1::Pattern(it->pattern).find_all(v1::Image{ bytes }, 2);
     REQUIRE(hits.size() == 1);               // unique in this image
-    REQUIRE(hits[0].value == 0x100);         // and it is the target
+    REQUIRE(match_target(hits[0]) == 0x100);         // and it is the target
 }
 
 TEST_CASE("Options::want bounds how many anchors are emitted", "[generate][xref]") {
@@ -331,9 +336,7 @@ TEST_CASE("two call sites with identical tails collapse to one candidate", "[gen
 
     // And the survivor is the FIRST emitted, which is what makes the output
     // reproducible rather than merely deduplicated.
-    auto comp = locate::compile(xrefs[0].pattern);
-    locate::prime(comp, bytes);
-    auto hits = locate::find_all(bytes, comp, xrefs[0].save_index, 4);
+    auto hits = v1::Pattern(xrefs[0].pattern).find_all(v1::Image{ bytes }, 4);
     REQUIRE(hits.size() == 2);           // the pattern genuinely matches both sites
     REQUIRE(hits[0].offset == 0x200);
 }
@@ -359,7 +362,7 @@ TEST_CASE("max_len truncates the tail when the image has more bytes than the opt
     });
     REQUIRE(it != cs.end());
     REQUIRE(it->literals == 6);   // the E8 plus 5 tail bytes, not 12
-    REQUIRE(it->pattern == "E8 $ { ' } 4C 8B D0 48 85");
+    REQUIRE(it->pattern == "E8 rel32(target) 4C 8B D0 48 85");
 }
 
 TEST_CASE("max_len truncates to what remains in the image when the call site is near the end", "[generate][xref]") {
@@ -386,7 +389,7 @@ TEST_CASE("max_len truncates to what remains in the image when the call site is 
     });
     REQUIRE(it != cs.end());
     REQUIRE(it->literals == 12);   // E8 plus all 11 remaining bytes, capped by image size
-    REQUIRE(it->pattern == "E8 $ { ' } 11 22 33 44 55 66 77 88 99 AA BB");
+    REQUIRE(it->pattern == "E8 rel32(target) 11 22 33 44 55 66 77 88 99 AA BB");
 }
 
 TEST_CASE("verified keeps a candidate unique and correct in both builds", "[generate][verified]") {
@@ -403,11 +406,9 @@ TEST_CASE("verified keeps a candidate unique and correct in both builds", "[gene
     for (const auto& c : v) {
         for (auto [img, want] : { std::pair{ &ba, (uint64_t)0x100 },
                                   std::pair{ &bb, (uint64_t)0x180 } }) {
-            auto comp = locate::compile(c.pattern);
-            locate::prime(comp, *img);
-            auto hits = locate::find_all(*img, comp, c.save_index, 2);
+            auto hits = v1::Pattern(c.pattern).find_all(v1::Image{ *img }, 2);
             REQUIRE(hits.size() == 1);
-            REQUIRE(hits[0].value == want);
+            REQUIRE(match_target(hits[0]) == want);
         }
     }
 }
@@ -454,9 +455,7 @@ TEST_CASE("verified drops a candidate that is not unique", "[generate][verified]
     generate::Image a{ ba, code, {}, {} }, b{ bb, code, {}, {} };
 
     for (const auto& c : generate::verified(a, 0x100, b, 0x180)) {
-        auto comp = locate::compile(c.pattern);
-        locate::prime(comp, ba);
-        REQUIRE(locate::find_all(ba, comp, c.save_index, 2).size() == 1);
+        REQUIRE(v1::Pattern(c.pattern).find_all(v1::Image{ ba }, 2).size() == 1);
     }
 }
 
@@ -506,9 +505,7 @@ TEST_CASE("Body anchors at the entry with a zero delta", "[generate][body]") {
             saw_body = true;
             REQUIRE(c.save_index == 0);
             REQUIRE(c.anchor_delta == 0);        // anchored AT the entry
-            auto comp = locate::compile(c.pattern);
-            locate::prime(comp, bytes);
-            auto hits = locate::find_all(bytes, comp, 0, 2);
+            auto hits = v1::Pattern(c.pattern).find_all(v1::Image{ bytes }, 2);
             REQUIRE(hits.size() == 1);
             // Explicitly signed: hits[0].offset is size_t, anchor_delta is
             // int64_t -- mixing them lets the unsigned operand silently win
@@ -532,9 +529,7 @@ TEST_CASE("a Body candidate anchored past the entry carries a nonzero delta",
     generate::Options o; o.want = 8;
     for (const auto& c : generate::candidates(img, 0x400, o)) {
         if (c.strategy != generate::Strategy::Body) continue;
-        auto comp = locate::compile(c.pattern);
-        locate::prime(comp, bytes);
-        auto hits = locate::find_all(bytes, comp, 0, 2);
+        auto hits = v1::Pattern(c.pattern).find_all(v1::Image{ bytes }, 2);
         if (hits.size() != 1) continue;
         // Whatever delta the generator chose, this identity must hold.
         REQUIRE((int64_t)hits[0].offset - c.anchor_delta == 0x400);
@@ -565,9 +560,7 @@ TEST_CASE("Body moves deeper when the entry itself is not distinctive", "[genera
     REQUIRE(it->anchor_delta != 0);    // moved past the undistinctive entry
     REQUIRE(it->anchor_delta == 16);   // observed by running this fixture, not assumed
 
-    auto comp = locate::compile(it->pattern);
-    locate::prime(comp, bytes);
-    auto hits = locate::find_all(bytes, comp, 0, 2);
+    auto hits = v1::Pattern(it->pattern).find_all(v1::Image{ bytes }, 2);
     REQUIRE(hits.size() == 1);
     REQUIRE((int64_t)hits[0].offset - it->anchor_delta == 0x400);  // match - delta == target
 }
@@ -658,7 +651,7 @@ TEST_CASE("Xref clamps the tail to the function containing the call site when fu
     });
     REQUIRE(it != cs.end());
     REQUIRE(it->literals == 5);   // E8 plus 4 tail bytes -- clamped to the function's end
-    REQUIRE(it->pattern == "E8 $ { ' } 4C 8B D0 48");
+    REQUIRE(it->pattern == "E8 rel32(target) 4C 8B D0 48");
 }
 
 TEST_CASE("Xref's tail is unchanged from current behaviour when funcs is empty",
@@ -681,7 +674,7 @@ TEST_CASE("Xref's tail is unchanged from current behaviour when funcs is empty",
     });
     REQUIRE(it != cs.end());
     REQUIRE(it->literals == 13);  // E8 plus the full 12-byte tail, exactly as Tasks 1-4
-    REQUIRE(it->pattern == "E8 $ { ' } 4C 8B D0 48 85 C0 74 C8 90 90 90 90");
+    REQUIRE(it->pattern == "E8 rel32(target) 4C 8B D0 48 85 C0 74 C8 90 90 90 90");
 }
 
 TEST_CASE("Body clamps its window to the function containing the anchor when funcs is supplied",
@@ -1260,16 +1253,14 @@ TEST_CASE("StringAnchor anchors on the lea when the load site is in the target's
     REQUIRE(c->save_index == 0);                       // no capture: the match itself
     REQUIRE(c->anchor_delta == 0x20);                  // 0x120 - 0x100
     // The four displacement bytes are wildcards, one `?` per byte.
-    REQUIRE(c->pattern.rfind("48 8D 0D ? ? ? ? 4C 8B D0 48 85 C0 74 11", 0) == 0);
+    REQUIRE(c->pattern.rfind("48 8D 0D ?? ?? ?? ?? 4C 8B D0 48 85 C0 74 11", 0) == 0);
 
     // max_len budgets the WHOLE pattern, so the tail gets 64 - 7 bytes, and
     // `literals` counts concrete bytes only -- the four `?` are not literals.
     REQUIRE(c->literals == 3 + (64 - 7));
 
     // What comes out must go back in, minus the delta.
-    auto comp = locate::compile(c->pattern);
-    locate::prime(comp, bytes);
-    auto hits = locate::find_all(bytes, comp, c->save_index, 2);
+    auto hits = v1::Pattern(c->pattern).find_all(v1::Image{ bytes }, 2);
     REQUIRE(hits.size() == 1);
     REQUIRE((uint64_t)((int64_t)hits[0].offset - c->anchor_delta) == 0x100);
 }
@@ -1293,7 +1284,7 @@ TEST_CASE("StringAnchor keeps the lea's modrm literal while wildcarding its disp
     auto cs = generate::candidates(img, 0x100, o);
     const auto* c = first_sa(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->pattern.rfind("48 8D 15 ? ? ? ? 4C 8B D0", 0) == 0);
+    REQUIRE(c->pattern.rfind("48 8D 15 ?? ?? ?? ?? 4C 8B D0", 0) == 0);
 }
 
 TEST_CASE("a StringAnchor pattern survives the string moving between builds",
@@ -1400,17 +1391,16 @@ TEST_CASE("StringAnchor spans lea to call when the load site is in a direct call
     auto cs = generate::candidates(img, 0x100);
     const auto* c = first_sa(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->save_index == 1);       // the `'` capture holds the callee
+    REQUIRE(c->save_index == 0);
+    REQUIRE(c->target_capture == "target");       // the `'` capture holds the callee
     REQUIRE(c->anchor_delta == 0);     // target comes from the slot, not the match
-    REQUIRE(c->pattern == "48 8D 0D ? ? ? ? 4C 8B D0 E8 $ { ' }");
+    REQUIRE(c->pattern == "48 8D 0D ?? ?? ?? ?? 4C 8B D0 E8 rel32(target)");
     REQUIRE(c->literals == 3 + 3 + 1); // lea opcode, gap, and the E8
 
     // The capture really does name the target.
-    auto comp = locate::compile(c->pattern);
-    locate::prime(comp, bytes);
-    auto hits = locate::find_all(bytes, comp, c->save_index, 2);
+    auto hits = v1::Pattern(c->pattern).find_all(v1::Image{ bytes }, 2);
     REQUIRE(hits.size() == 1);
-    REQUIRE(hits[0].value == 0x100);
+    REQUIRE(match_target(hits[0]) == 0x100);
 
     // And verified() agrees -- it must read a capturing candidate's target
     // out of the save slot, not out of the match offset.
@@ -1428,7 +1418,7 @@ TEST_CASE("StringAnchor spans lea to call when the load site is in a direct call
 }
 
 TEST_CASE("StringAnchor does not chase a grandcaller's string", "[generate][stringanchor]") {
-    // G loads the string and calls F; F calls the target. `E8 $ { ' }` resolves
+    // G loads the string and calls F; F calls the target. `E8 rel32(target)` resolves
     // exactly ONE call edge, so a pattern anchored in G would capture F, not
     // the target. The bound is structural, not a budget.
     std::vector<uint8_t> bytes(kSaSize, 0xCC);
@@ -1451,7 +1441,8 @@ TEST_CASE("StringAnchor does not chase a grandcaller's string", "[generate][stri
     generate::Image direct{ bytes, code, rodata, funcs };
     auto cs = generate::candidates(direct, 0x100);
     REQUIRE(count_sa(cs) == 1);
-    REQUIRE(first_sa(cs)->save_index == 1);
+    REQUIRE(first_sa(cs)->save_index == 0);
+    REQUIRE(first_sa(cs)->target_capture == "target");
 }
 
 TEST_CASE("StringAnchor's call must lie in the same function as the lea",
@@ -1492,9 +1483,10 @@ TEST_CASE("with funcs empty StringAnchor emits only the depth-1 form",
     auto cs = generate::candidates(img, 0x100);
     const auto* c = first_sa(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->save_index == 1);
+    REQUIRE(c->save_index == 0);
+    REQUIRE(c->target_capture == "target");
     REQUIRE(c->anchor_delta == 0);
-    REQUIRE(c->pattern == "48 8D 0D ? ? ? ? 4C 8B D0 E8 $ { ' }");
+    REQUIRE(c->pattern == "48 8D 0D ?? ?? ?? ?? 4C 8B D0 E8 rel32(target)");
 }
 
 TEST_CASE("with funcs empty a lea with no call to the target after it anchors nothing",
@@ -1530,9 +1522,9 @@ TEST_CASE("StringAnchor emits nothing rather than a pattern too short to reach t
     const auto* c = first_sa(cs);
     REQUIRE(c != nullptr);
     REQUIRE(c->literals == 3 + (0x290 - 0x217) + 1);
-    REQUIRE(c->pattern.rfind("48 8D 0D ? ? ? ? 4C 8B D0 CC", 0) == 0);
+    REQUIRE(c->pattern.rfind("48 8D 0D ?? ?? ?? ?? 4C 8B D0 CC", 0) == 0);
     REQUIRE(c->pattern.size() > 10);
-    REQUIRE(c->pattern.rfind("E8 $ { ' }") == c->pattern.size() - 10);  // and it reaches the call
+    REQUIRE(c->pattern.rfind("E8 rel32(target)") == c->pattern.size() - 16);  // and it reaches the call
 }
 
 TEST_CASE("StringAnchor runs after Body and inside the same anchor budget",
@@ -1643,12 +1635,18 @@ static const generate::Candidate* first_rr(const std::vector<generate::Candidate
 static std::optional<uint64_t> captured(const std::vector<uint8_t>& img,
                                         const std::string& pattern,
                                         size_t save_index = 1) {
-    auto comp = locate::compile(pattern);
-    locate::prime(comp, img);
-    auto hits = locate::find_all(img, comp, save_index, 2);
-    if (hits.size() != 1)
+    try {
+        auto hits = v1::Pattern(pattern).find_all(v1::Image{ img }, 2);
+        if (hits.size() != 1)
+            return std::nullopt;
+        if (save_index == 0)
+            return hits[0].offset;
+        if (save_index > hits[0].captures.size())
+            return std::nullopt;
+        return hits[0].captures[save_index - 1].data.value;
+    } catch (...) {
         return std::nullopt;
-    return hits[0].value;
+    }
 }
 
 TEST_CASE("RipRef anchors on a mov whose disp32 names the global", "[generate][ripref]") {
@@ -1669,8 +1667,9 @@ TEST_CASE("RipRef anchors on a mov whose disp32 names the global", "[generate][r
     // Here the filler is 0xCC, so the tail is four bytes of it -- the floor
     // (detail::kMinLiteralRun), since one byte of context is already unique
     // on a fixture this bare.
-    REQUIRE(c->pattern == "48 8B 0D $ { ' } CC CC CC CC");
-    REQUIRE(c->save_index == 1);                 // captures, so nonzero -- the invariant
+    REQUIRE(c->pattern == "48 8B 0D rel32(target) CC CC CC CC");
+    REQUIRE(c->save_index == 0);
+    REQUIRE(c->target_capture == "target");                 // captures, so nonzero -- the invariant
     REQUIRE(c->anchor_delta == 0);               // target comes from the slot
     REQUIRE(c->literals == 3 + 4);               // 48 8B 0D, plus the tail
     REQUIRE(c->seed.ok());
@@ -1706,8 +1705,9 @@ TEST_CASE("RipRef anchors on a lea, which NAMES a global rather than reading it"
     const auto* c = first_rr(cs);
     REQUIRE(c != nullptr);
     // disp32 is the last field, so a bare `$` is correct: no corrective skip.
-    REQUIRE(c->pattern == "4C 8D 35 $ { ' } CC CC CC CC");
-    REQUIRE(c->save_index == 1);
+    REQUIRE(c->pattern == "4C 8D 35 rel32(target) CC CC CC CC");
+    REQUIRE(c->save_index == 0);
+    REQUIRE(c->target_capture == "target");
     REQUIRE(c->anchor_delta == 0);
     REQUIRE(captured(bytes, c->pattern) == kRrGlobal);
 }
@@ -1729,8 +1729,9 @@ TEST_CASE("RipRef corrects for a trailing imm32, and the uncorrected form is fou
     // so the trailing imm32 (0x98) lands in it as literal context. That is
     // the immediate working FOR the pattern: "the site that multiplies this
     // global by 0x98" is far more distinctive than "a site that reads it".
-    REQUIRE(c->pattern == "48 69 15 $ { [4] ' } 98 00 00 00");
-    REQUIRE(c->save_index == 1);
+    REQUIRE(c->pattern == "48 69 15 rel32(target, target_add=4) 98 00 00 00");
+    REQUIRE(c->save_index == 0);
+    REQUIRE(c->target_capture == "target");
     REQUIRE(c->anchor_delta == 0);
     REQUIRE(c->literals == 3 + 4);
 
@@ -1741,7 +1742,7 @@ TEST_CASE("RipRef corrects for a trailing imm32, and the uncorrected form is fou
 
     // And the pattern that would come out with the skip dropped resolves four
     // bytes below it -- plausible, unique, and wrong.
-    REQUIRE(captured(bytes, "48 69 15 $ { ' }") == kRrGlobal - 4);
+    REQUIRE(captured(bytes, "48 69 15 rel32(target)") == kRrGlobal - 4);
 }
 
 TEST_CASE("RipRef corrects for a trailing imm8, and the uncorrected form is one byte low",
@@ -1754,11 +1755,11 @@ TEST_CASE("RipRef corrects for a trailing imm8, and the uncorrected form is one 
     auto cs = generate::candidates(img, kRrGlobal);
     const auto* c = first_rr(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->pattern == "83 3D $ { [1] ' } 07 CC CC CC");
+    REQUIRE(c->pattern == "83 3D rel32(target, target_add=1) 07 CC CC CC");
     REQUIRE(c->literals == 2 + 4);               // 83 and the modrm, plus the tail
 
     REQUIRE(captured(bytes, c->pattern) == kRrGlobal);
-    REQUIRE(captured(bytes, "83 3D $ { ' }") == kRrGlobal - 1);
+    REQUIRE(captured(bytes, "83 3D rel32(target)") == kRrGlobal - 1);
 }
 
 TEST_CASE("RipRef corrects for the imm32 store form too", "[generate][ripref]") {
@@ -1776,9 +1777,9 @@ TEST_CASE("RipRef corrects for the imm32 store form too", "[generate][ripref]") 
     // The stored constant is the first thing in the tail, which is exactly
     // the context this form wants: `mov qword [rip+X], 1` is one particular
     // initialisation, not "some write to the global".
-    REQUIRE(c->pattern == "48 C7 05 $ { [4] ' } 01 00 00 00");
+    REQUIRE(c->pattern == "48 C7 05 rel32(target, target_add=4) 01 00 00 00");
     REQUIRE(captured(bytes, c->pattern) == kRrGlobal);
-    REQUIRE(captured(bytes, "48 C7 05 $ { ' }") == kRrGlobal - 4);
+    REQUIRE(captured(bytes, "48 C7 05 rel32(target)") == kRrGlobal - 4);
 }
 
 TEST_CASE("RipRef's target arithmetic uses the FULL instruction length, immediate included",
@@ -1810,7 +1811,7 @@ TEST_CASE("an encoding outside the table anchors nothing rather than being guess
     // `C7 05 <disp32> <imm32>` -- the 32-bit-operand store, no REX prefix, ten
     // bytes long. It is a real RIP-relative reference to the global and it is
     // NOT in the table, so nothing is emitted for it. The alternative -- assume
-    // the disp32 is last -- would emit `C7 05 $ { ' }`, which matches, reports
+    // the disp32 is last -- would emit `C7 05 rel32(target)`, which matches, reports
     // one hit, and captures an address four bytes below the global with nothing
     // downstream able to notice.
     std::vector<uint8_t> bytes(kRrSize, 0xCC);
@@ -1829,8 +1830,8 @@ TEST_CASE("an encoding outside the table anchors nothing rather than being guess
 
     // The fixture is only meaningful if the site really does reference the
     // global, and if the guessed reading really would be wrong.
-    REQUIRE(captured(bytes, "C7 05 $ { [4] ' }") == kRrGlobal);
-    REQUIRE(captured(bytes, "C7 05 $ { ' }") == kRrGlobal - 4);
+    REQUIRE(captured(bytes, "C7 05 rel32(target, target_add=4)") == kRrGlobal);
+    REQUIRE(captured(bytes, "C7 05 rel32(target)") == kRrGlobal - 4);
 }
 
 TEST_CASE("RipRef leaves modrm's reg field free where it names a register",
@@ -1846,8 +1847,8 @@ TEST_CASE("RipRef leaves modrm's reg field free where it names a register",
 
     auto cs = generate::candidates(img, kRrGlobal);
     REQUIRE(count_rr(cs) == 2);
-    REQUIRE(cs[0].pattern == "48 8B 05 $ { ' } CC CC CC CC");
-    REQUIRE(cs[1].pattern == "48 8B 3D $ { ' } CC CC CC CC");
+    REQUIRE(cs[0].pattern == "48 8B 05 rel32(target) CC CC CC CC");
+    REQUIRE(cs[1].pattern == "48 8B 3D rel32(target) CC CC CC CC");
 }
 
 TEST_CASE("RipRef holds modrm's reg field where the opcode's own /digit lives there",
@@ -2046,14 +2047,15 @@ TEST_CASE("a RipRef candidate survives the global moving between builds",
     // The imm32 rides along in the tail and is identical in both builds --
     // only the disp32 moved, and the disp32 is the one field the pattern
     // does not spell out.
-    REQUIRE(first_rr(v)->pattern == "48 69 15 $ { [4] ' } 98 00 00 00");
-    REQUIRE(first_rr(v)->save_index == 1);
+    REQUIRE(first_rr(v)->pattern == "48 69 15 rel32(target, target_add=4) 98 00 00 00");
+    REQUIRE(first_rr(v)->save_index == 0);
+    REQUIRE(first_rr(v)->target_capture == "target");
 
-    // save_index 0 would send resolves_uniquely down the match-offset branch,
+    // Clearing the capture sends resolve_semantic down the match-offset branch,
     // which answers 0x120 rather than the global: the candidate resolves to
     // its own anchor and nothing survives.
     generate::Candidate mis = *first_rr(v);
-    mis.save_index = 0;
+    mis.target_capture.clear();
     REQUIRE_FALSE(generate::detail::resolves_uniquely(a, mis, 0x1200));
 }
 
@@ -2113,9 +2115,12 @@ static const generate::Candidate* first_of(const std::vector<generate::Candidate
 // say "this is NOT unique, and here is how far from unique it is".
 static size_t hit_count(const std::vector<uint8_t>& img, const std::string& pattern,
                         size_t save_index = 0) {
-    auto comp = locate::compile(pattern);
-    locate::prime(comp, img);
-    return locate::find_all(img, comp, save_index, 8).size();
+    (void)save_index;
+    try {
+        return v1::Pattern(pattern).find_all(v1::Image{ img }, 8).size();
+    } catch (...) {
+        return 0;
+    }
 }
 
 // A target every strategy has something to say about: it is CALLED (Xref), it
@@ -2398,20 +2403,20 @@ TEST_CASE("prefer_short shortens an Xref tail without disturbing the capture",
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     generate::Image img{ bytes, code, {}, {} };
 
-    REQUIRE(hit_count(bytes, "E8 $ { ' } AA BB 11 22 33", 1) == 2);
-    REQUIRE(hit_count(bytes, "E8 $ { ' } AA BB 11 22 33 44", 1) == 1);
+    REQUIRE(hit_count(bytes, "E8 rel32(target) AA BB 11 22 33", 1) == 2);
+    REQUIRE(hit_count(bytes, "E8 rel32(target) AA BB 11 22 33 44", 1) == 1);
 
     auto cs = generate::candidates(img, 0x100);
     const auto* x = first_of(cs, generate::Strategy::Xref);
     REQUIRE(x != nullptr);
-    REQUIRE(x->pattern == "E8 $ { ' } AA BB 11 22 33 44");
+    REQUIRE(x->pattern == "E8 rel32(target) AA BB 11 22 33 44");
     REQUIRE(x->literals == 7);                 // the E8 plus six tail bytes
     REQUIRE(captured(bytes, x->pattern) == 0x100);
 }
 
 TEST_CASE("prefer_short never shortens a run a later atom depends on",
           "[generate][integration][prefer_short]") {
-    // StringAnchor's depth-1 gap is NOT a trailing run: the `E8 $ { ' }`
+    // StringAnchor's depth-1 gap is NOT a trailing run: the `E8 rel32(target)`
     // behind it is what fills the save slot. Shortening it would be legal by
     // the uniqueness test alone -- the shorter head really is unique here --
     // and would produce a pattern that reaches no `E8` and captures nothing.
@@ -2424,15 +2429,15 @@ TEST_CASE("prefer_short never shortens a run a later atom depends on",
     auto cs = generate::candidates(img, 0x100);   // prefer_short on, by default
     const auto* c = first_sa(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->pattern == "48 8D 0D ? ? ? ? 4C 8B D0 E8 $ { ' }");
+    REQUIRE(c->pattern == "48 8D 0D ?? ?? ?? ?? 4C 8B D0 E8 rel32(target)");
     REQUIRE(c->literals == 3 + 3 + 1);
     REQUIRE(captured(bytes, c->pattern) == 0x100);
 
     // The temptation, and what it costs. One byte of gap IS unique on its own
     // -- so a uniqueness-only rule would happily stop there ...
-    REQUIRE(hit_count(bytes, "48 8D 0D ? ? ? ? 4C") == 1);
+    REQUIRE(hit_count(bytes, "48 8D 0D ?? ?? ?? ?? 4C") == 1);
     // ... and the pattern that results reaches no call at all.
-    REQUIRE(captured(bytes, "48 8D 0D ? ? ? ? 4C E8 $ { ' }") == std::nullopt);
+    REQUIRE(captured(bytes, "48 8D 0D ?? ?? ?? ?? 4C E8 rel32(target)") == std::nullopt);
 }
 
 TEST_CASE("verified oversamples so `want` counts anchors that work, not anchors tried",
@@ -2616,7 +2621,7 @@ TEST_CASE("a strategy's bucket is capped at `want`, so a well-called target boun
 TEST_CASE("RipRef carries enough context to be unique among instructions sharing its opcode",
           "[generate][ripref][integration]") {
     // WHY EVERY OTHER RipRef FIXTURE HERE MISSES THIS. They fill with 0xCC,
-    // where the opcode occurs exactly once and `48 8B 0D $ { ' }` is unique
+    // where the opcode occurs exactly once and `48 8B 0D rel32(target)` is unique
     // by accident of the fixture. A real image has hundreds of
     // `mov r64, [rip+X]`, and the context-free form is then an INSTRUCTION
     // SELECTOR: many hits, resolves_uniquely rejects it, verified() returns
@@ -2641,13 +2646,13 @@ TEST_CASE("RipRef carries enough context to be unique among instructions sharing
     // by how much. The global sits outside `code` and is never called, so
     // RipRef is the only strategy with anything to say -- as it is for any
     // real global.
-    REQUIRE(hit_count(ba, "48 8B 0D $ { ' }", 1) == 7);
+    REQUIRE(hit_count(ba, "48 8B 0D rel32(target)", 1) == 7);
 
     auto cs = generate::candidates(a, 0x1A00);
     REQUIRE(cs.size() == 1);
     const auto* c = first_rr(cs);
     REQUIRE(c != nullptr);
-    REQUIRE(c->pattern == "48 8B 0D $ { ' } 4C 8B D0 48");
+    REQUIRE(c->pattern == "48 8B 0D rel32(target) 4C 8B D0 48");
     REQUIRE(hit_count(ba, c->pattern, 1) == 1);      // the tail resolves it
     REQUIRE(captured(ba, c->pattern) == 0x1A00);
 
@@ -2658,7 +2663,7 @@ TEST_CASE("RipRef carries enough context to be unique among instructions sharing
     // And the same candidate stripped of its tail resolves nowhere: seven
     // hits, so resolves_uniquely rejects it and verified() would be empty.
     generate::Candidate bare = *first_rr(v);
-    bare.pattern = "48 8B 0D $ { ' }";
+    bare.pattern = "48 8B 0D rel32(target)";
     REQUIRE_FALSE(generate::detail::resolves_uniquely(ba, bare, 0x1A00));
 }
 
@@ -2863,7 +2868,7 @@ TEST_CASE("verified's oversample survives the round-robin at want = 1",
 TEST_CASE("RipRef emits nothing when there is no room for context",
           "[generate][ripref]") {
     // With max_len at or below the head, the tail is empty and the pattern
-    // degenerates to the bare `48 8B 0D $ { ' }` selector -- three literal
+    // degenerates to the bare `48 8B 0D rel32(target)` selector -- three literal
     // bytes and a capture, the exact shape that cannot be unique on a real
     // image. Skipping beats emitting something verified() must discard.
     std::vector<uint8_t> bytes(0x800, 0xCC);
@@ -2961,7 +2966,7 @@ TEST_CASE("rip_lea_index agrees with rip_refs_to, target for target",
 //   * StringAnchor scanned the whole image once per content-unique string. At
 //     4KB that is free; on the 133MB image it was 71 minutes for ONE target.
 //     No fixture here is large enough for the cost to exist.
-//   * RipRef emitted `48 8B 0D $ { ' }` -- three literal bytes and a capture.
+//   * RipRef emitted `48 8B 0D rel32(target)` -- three literal bytes and a capture.
 //     Against 0xCC filler the opcode occurs once and that is unique. Against
 //     real code it has thousands of hits and verifies to nothing.
 //
@@ -3110,10 +3115,7 @@ TEST_CASE("verified() finds a function in a crowded image", "[generate][structur
     // Every survivor must genuinely be unique in its own image -- that is what
     // verified() claims, and in a sparse fixture it is true for free.
     for (const auto& c : v) {
-        auto comp = locate::compile(c.pattern);
-        locate::prime(comp, a.bytes);
-        INFO("pattern: " << c.pattern);
-        REQUIRE(locate::find_all(a.bytes, comp, c.save_index, 2).size() == 1);
+        REQUIRE(v1::Pattern(c.pattern).find_all(v1::Image{ a.bytes }, 2).size() == 1);
     }
 }
 

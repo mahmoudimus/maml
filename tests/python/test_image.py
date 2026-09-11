@@ -1,27 +1,27 @@
 import pytest
 
-import maml
+from maml import _core
 
 
 def test_from_bytes_reports_size_and_base():
-    img = maml.Image.from_bytes(b"\x90" * 64, base=0x140000000)
+    img = _core.Image.from_bytes(b"\x90" * 64, base=0x140000000)
     assert img.size == 64
     assert img.base == 0x140000000
 
 
 def test_base_defaults_to_zero():
-    assert maml.Image.from_bytes(b"\x00").base == 0
+    assert _core.Image.from_bytes(b"\x00").base == 0
 
 
 def test_to_va_adds_the_base():
-    img = maml.Image.from_bytes(b"\x00" * 16, base=0x1000)
+    img = _core.Image.from_bytes(b"\x00" * 16, base=0x1000)
     assert img.to_va(0x10) == 0x1010
 
 
 def test_from_file_round_trips(tmp_path):
     p = tmp_path / "img.bin"
     p.write_bytes(bytes(range(256)))
-    img = maml.Image.from_file(str(p))
+    img = _core.Image.from_file(str(p))
     assert img.size == 256
 
 
@@ -63,7 +63,7 @@ def test_the_buffer_survives_its_source_going_away():
     # because .size is copied out at construction time. _churn() forces the
     # allocator to reuse the freed block so a broken pin shows up as observed
     # corruption instead of passing by luck.
-    img = maml.Image.from_bytes(bytes(range(256)))
+    img = _core.Image.from_bytes(bytes(range(256)))
     _keepalive = _churn()
     assert img[0] == 0
     assert img[255] == 255
@@ -73,19 +73,19 @@ def test_the_buffer_survives_its_source_going_away():
 def test_from_file_data_is_readable_after_the_temporary_is_gone(tmp_path):
     p = tmp_path / "img.bin"
     p.write_bytes(bytes(range(256)))
-    img = maml.Image.from_file(str(p))      # the bytes temporary is unreferenced
+    img = _core.Image.from_file(str(p))      # the bytes temporary is unreferenced
     _keepalive = _churn()
     assert img[0] == 0 and img[255] == 255
 
 
 def test_getitem_supports_negative_indexing():
-    img = maml.Image.from_bytes(bytes(range(16)))
+    img = _core.Image.from_bytes(bytes(range(16)))
     assert img[-1] == 15
     assert img[-16] == 0
 
 
 def test_getitem_out_of_range_raises_index_error():
-    img = maml.Image.from_bytes(bytes(range(16)))
+    img = _core.Image.from_bytes(bytes(range(16)))
     with pytest.raises(IndexError):
         img[16]
     with pytest.raises(IndexError):
@@ -94,7 +94,7 @@ def test_getitem_out_of_range_raises_index_error():
 
 def test_a_pinned_bytearray_cannot_be_resized():
     buf = bytearray(b"\x90" * 32)
-    img = maml.Image.from_bytes(buf)
+    img = _core.Image.from_bytes(buf)
     with pytest.raises(BufferError):
         buf += b"\x00"          # resizing while exported must fail, not corrupt
     assert img.size == 32
@@ -102,4 +102,4 @@ def test_a_pinned_bytearray_cannot_be_resized():
 
 def test_direct_construction_is_rejected():
     with pytest.raises(TypeError):
-        maml.Image()
+        _core.Image()

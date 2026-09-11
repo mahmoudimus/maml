@@ -35,11 +35,6 @@ cdef extern from "<span>" namespace "std" nogil:
         ByteSpan(const uint8_t*, size_t)
 
 
-cdef extern from "<optional>" namespace "std" nogil:
-    cdef cppclass optional[T]:
-        cbool has_value()
-        T& value()
-
 
 cdef extern from *:
     void raise_pattern_error()
@@ -58,29 +53,6 @@ cdef extern from "maml/mamlscan.hpp" namespace "maml::locate" nogil:
         vector[uint8_t] bytes
         cbool ok()
 
-    cdef cppclass Hit_t "maml::locate::Hit":
-        size_t offset
-        size_t value
-        size_t candidates
-        size_t verified
-
-    cdef cppclass Compiled:
-        Compiled()
-        Seed_t seed
-
-    Compiled cpp_compile "maml::locate::compile" (string) except +raise_pattern_error
-    void cpp_prime "maml::locate::prime" (Compiled&, ByteSpan, size_t) except +
-    optional[Hit_t] cpp_find "maml::locate::find" (ByteSpan, const Compiled&, size_t) except +
-    vector[Hit_t] cpp_find_all "maml::locate::find_all" (ByteSpan, const Compiled&, size_t, size_t) except +
     size_t count_up_to(ByteSpan, const vector[uint8_t]&, size_t) except +
 
 
-cdef class Pattern:
-    cdef Compiled _c
-    cdef readonly str text
-
-
-cdef class Primed:
-    cdef Compiled _c
-    cdef Image _img
-    cdef object _seed  # lazily-built Seed, memoized so its count cache holds
