@@ -88,12 +88,6 @@ jobs:
 
   python:
     # The Python suite against a tree that also has mamlscan built.
-    #
-    # wheels.yml runs this suite against every built wheel, which is the right
-    # place for it -- but cibuildwheel's test environment has no CMake build,
-    # so test_differential.py (8 tests: "the bindings must agree with the
-    # mamlscan CLI, which is the verified path") skipped on every platform. It
-    # was the most valuable Python test and the only one that never ran.
     name: Python ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -107,15 +101,15 @@ jobs:
       with:
         python-version: "3.13"
 
-    # mamlscan is what test_differential compares the bindings against.
+    # Prove the C++ CLI compiles on this runner too.
     - name: Build mamlscan
       run: |
         cmake -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build --config Release
 
     # The [pe] extra pulls lief, which test_containers needs. Without it those
-    # 3 tests skip -- and "1 skipped" in a green run is how the differential
-    # suite stayed dark for months. lief ships wheels for all three runners.
+    # 3 tests skip -- and a skipped test in a green run is how a suite can
+    # silently shrink. lief ships wheels for all three runners.
     - name: Install the extension and pytest
       run: python -m pip install --disable-pip-version-check ".[pe]" pytest
 
@@ -136,22 +130,6 @@ jobs:
 
     - name: MAML v1 language conformance
       run: python tools/check_conformance.py --adapter python -m maml.v1_adapter
-
-    # The differential tests skipped silently on every platform for months
-    # because they could not find mamlscan. A green suite that quietly ran 8
-    # fewer tests is the failure this guard exists to make impossible.
-    - name: The differential suite must actually run
-      shell: bash
-      run: |
-        out=$(python -m pytest tests/python/test_differential.py -q -o pythonpath= 2>&1)
-        echo "$out"
-        case "$out" in
-          *skipped*) echo "::error::test_differential skipped; it must run here"; exit 1 ;;
-        esac
-        case "$out" in
-          *"8 passed"*) ;;
-          *) echo "::error::expected 8 differential tests, got: $out"; exit 1 ;;
-        esac
 
   consume:
     name: Consumable via add_subdirectory

@@ -32,6 +32,7 @@
 
 #include "version.hpp"
 #include <algorithm>
+#include <cstdint>
 #include <bit>
 #include <cctype>
 #include <cstdlib>
