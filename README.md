@@ -113,6 +113,7 @@ be shared between threads.
 | Stage | Result |
 | --- | --- |
 | `str("text")` | Exact indexed string addresses; requires rodata |
+| `str("text", match="contains")` | Starts of indexed strings containing the text; requires rodata |
 | `bytes("pattern")` | Match records across the image |
 | `find("pattern")` | Match records starting within enclosing functions; requires function ranges |
 | `before("pattern", within=N)` | All matches ending 0..N bytes before each anchor |
@@ -159,6 +160,52 @@ captures raise `SchemaError`, and failed `unique` raises `CardinalityError`.
 Missing metadata and resource exhaustion raise `ExecutionError`. Compiler
 errors carry a `code` and native parser `position`. C++ reports `maml::v1::Error`
 with the same code and position.
+
+### String matching modes
+
+`str("text")` defaults to `match="exact"`. Use `match="contains"` for a
+case-sensitive substring search within the existing indexed strings:
+
+```text
+str("DeferredInputEventChange", match="contains")
+    -> xrefs
+    -> nth(0)
+    -> func
+    -> unique
+```
+
+Both modes return each matching **enclosing string's start** once, sorted by
+address (including the image base). They never return the substring's interior
+address. Repeated occurrences within one string still produce one result, so
+`xrefs` searches references to the enclosing start. Empty needles are rejected
+only for `match="contains"`; exact-mode `str("")` remains valid and returns no
+indexed strings. Unknown modes are compile errors. Substrings cannot span
+separate indexed strings.
+
+This does not change string discovery: the existing printable-ASCII indexing,
+minimum indexed length of six bytes, and `rodata` requirements still apply.
+The needle itself may be shorter than six bytes. `match="exact"` is also accepted
+explicitly; no case folding or approximate matching is performed.
+
+```text
+string_source := "str" "(" quoted_text ["," "match" "=" ("\"exact\"" | "\"contains\"")] ")"
+```
+
+Python uses keyword-only `match_mode="exact"` (the pipeline text retains
+`match=`). C++ uses `StringMatch::Exact` (the default) or `StringMatch::Contains`. Unknown textual modes, including modes
+provided through the Python builder, are rejected during pipeline compilation:
+
+```python
+query = (v1.PipelineBuilder()
+         .str("DeferredInputEventChange", match_mode="contains")
+         .xrefs().nth(0).func().unique().build())
+```
+
+```cpp
+const auto query = maml::v1::PipelineBuilder()
+    .str("DeferredInputEventChange", maml::v1::StringMatch::Contains)
+    .xrefs().nth(0).func().unique().build();
+```
 
 ### Directional searches
 

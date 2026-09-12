@@ -152,3 +152,17 @@ TEST_CASE("v1 directional pipeline windows and builders", "[v1][pipeline]") {
     REQUIRE(after.matches[1].offset == 4);
     REQUIRE_THROWS_AS(Pipeline("bytes(\"AA\") -> before(\"CC\", within=-1)"), Error);
 }
+
+TEST_CASE("v1 string contains returns indexed string starts", "[v1][pipeline]") {
+    using namespace maml::v1;
+    const std::string text = "PrefixNeedleNeedle";
+    const Image image{ std::span(reinterpret_cast<const uint8_t*>(text.c_str()), text.size() + 1) };
+    const std::array<maml::generate::Range, 1> rodata{ { { 0, text.size() + 1 } } };
+    auto result = PipelineBuilder().str("Needle", StringMatch::Contains).build().run(image, {}, rodata);
+    REQUIRE(result.values.size() == 1);
+    REQUIRE(result.values[0].value == 0);
+    REQUIRE_FALSE(PipelineBuilder().str("Needle").build().run(image, {}, rodata).ok());
+    REQUIRE_THROWS_AS(PipelineBuilder().str("Needle", static_cast<StringMatch>(99)).build(), Error);
+    REQUIRE_FALSE(PipelineBuilder().str("").build().run(image, {}, rodata).ok());
+    REQUIRE_THROWS_AS(PipelineBuilder().str("", StringMatch::Contains).build(), Error);
+}

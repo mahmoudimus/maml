@@ -225,8 +225,8 @@ class PipelineBuilder:
     def _append(self, stage):
         return PipelineBuilder(self._stages + (stage,))
 
-    def str(self, text):
-        return self._append('str(' + _quote_pipeline_argument(text) + ')')
+    def str(self, text, *, match_mode='exact'):
+        return self._append('str(' + _quote_pipeline_argument(text) + ', match=' + _quote_pipeline_argument(match_mode) + ')')
 
     def bytes(self, pattern):
         return self._append('bytes(' + _quote_pipeline_argument(pattern) + ')')

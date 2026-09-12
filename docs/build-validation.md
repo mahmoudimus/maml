@@ -74,3 +74,17 @@ protocol; directional pipeline behavior is covered by the C++ and Python tests,
 not those 60 vectors. Older test totals above predate removal of the unversioned
 dialect. Installed-wheel and sanitizer verification were not repeated for this
 change.
+
+## String contains mode
+
+After rebuilding C++ targets and the Cython extension, all 213 Python tests,
+130 C++ cases (794 assertions), and 60 existing conformance vectors passed.
+The added string-mode tests verify enclosing starts, repeated substring
+occurrences, case sensitivity, explicit/default exact mode, builder parity,
+invalid modes, rejection of empty contains needles, preserved exact empty needles,
+keyword-only Python match_mode, typed C++ StringMatch, unchanged indexing requirements, and a
+substring-to-xref pipeline. A `mamlpipe` smoke check returned the enclosing
+start at offset zero for `str("ClearScripts", match="contains") -> unique`.
+The existing JSONL vectors do not cover pipeline operations; those are tested
+through the C++ and Python suites. No installed-wheel or sanitizer rerun was
+performed for this change.

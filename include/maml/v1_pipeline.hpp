@@ -21,7 +21,7 @@ namespace maml::v1 {
     };
     class Pipeline {
         struct Stage {
-            std::string name, argument, modifier;
+            std::string name, argument, modifier, string_match = "exact";
             uint64_t number = 0;
             std::optional<Pattern> pattern;
         };
@@ -105,6 +105,27 @@ namespace maml::v1 {
                         if (s.name == "read" && s.number != 1 && s.number != 2 && s.number != 4 && s.number != 8)
                             throw Error("InvalidArgument", "read width must be 1, 2, 4, or 8", p);
                     }
+                    if (s.name == "str") {
+                        ws();
+                        if (p < source.size() && source[p] == ',') {
+                            ++p;
+                            ws();
+                            if (source.substr(p, 5) != "match")
+                                throw Error("InvalidArgument", "Expected match=\"exact\" or match=\"contains\"", p);
+                            p += 5;
+                            need('=');
+                            need('"');
+                            const size_t start = p;
+                            while (p < source.size() && source[p] != '"')
+                                ++p;
+                            s.string_match = std::string(source.substr(start, p - start));
+                            need('"');
+                            if (s.string_match != "exact" && s.string_match != "contains")
+                                throw Error("InvalidArgument", "String match mode must be exact or contains", start);
+                        }
+                    }
+                    if (s.name == "str" && s.string_match == "contains" && s.argument.empty())
+                        throw Error("InvalidArgument", "contains requires a nonempty needle", p);
                     if (directional) {
                         need(',');
                         ws();
@@ -241,9 +262,11 @@ namespace maml::v1 {
                     if (s.name == "str") {
                         if (rodata.empty())
                             throw Error("MissingMetadata", "str requires rodata ranges");
-                        for (const auto& str : maml::generate::strings(indexed))
-                            if (str.len == s.argument.size() && std::equal(s.argument.begin(), s.argument.end(), image.bytes.begin() + ptrdiff_t(str.rva)))
+                        for (const auto& str : maml::generate::strings(indexed)) {
+                            const std::string_view value(reinterpret_cast<const char*>(image.bytes.data() + str.rva), str.len);
+                            if (s.string_match == "contains" ? value.find(s.argument) != std::string_view::npos : value == s.argument)
                                 r.values.push_back(address(str.rva));
+                        }
                     } else if (s.name == "before" || s.name == "after") {
                         std::set<uint64_t> emitted;
                         size_t attempts = 0;
@@ -354,6 +377,9 @@ namespace maml::v1 {
         }
     };
 
+    enum class StringMatch { Exact,
+        Contains };
+
     enum class FunctionMode { Default,
         Loose,
         Strict };
@@ -392,8 +418,11 @@ namespace maml::v1 {
         const std::string& source() const {
             return source_;
         }
-        PipelineBuilder str(std::string_view text) const {
-            return append("str(" + quote(text) + ")");
+        PipelineBuilder str(std::string_view text, StringMatch match = StringMatch::Exact) const {
+            // Invalid enum casts still enter the shared compiler's mode validation.
+            const auto mode = match == StringMatch::Exact ? "exact" : match == StringMatch::Contains ? "contains"
+                                                                                                     : "invalid";
+            return append("str(" + quote(text) + ", match=" + quote(mode) + ")");
         }
         PipelineBuilder bytes(std::string_view text) const {
             return append("bytes(" + quote(text) + ")");
