@@ -32,14 +32,14 @@ cdef extern from *:
     }
     static maml::v1::PipelineResult maml_v1_pipeline_run(const maml::v1::Pipeline& pipeline,
             const maml::v1::Image& image, const std::vector<maml::generate::Range>& code,
-            const std::vector<maml::generate::Range>& rodata, const std::vector<maml::generate::Range>& funcs) {
-        return pipeline.run(image,code,rodata,funcs);
+            const std::vector<maml::generate::Range>& rodata, const std::vector<maml::generate::Range>& funcs, const std::vector<maml::generate::Range>& instructions) {
+        return pipeline.run(image,code,rodata,funcs,instructions);
     }
     """
     void maml_v1_error()
     CImage maml_v1_image(const uint8_t*, size_t, uint64_t, const map[uint64_t,uint64_t]&) except +maml_v1_error nogil
     vector[CMatch] maml_v1_match_at(const CPattern&, const CImage&, uint64_t) except +maml_v1_error nogil
-    CResult maml_v1_pipeline_run(const CPipeline&, const CImage&, const vector[CRange]&, const vector[CRange]&, const vector[CRange]&) except +maml_v1_error nogil
+    CResult maml_v1_pipeline_run(const CPipeline&, const CImage&, const vector[CRange]&, const vector[CRange]&, const vector[CRange]&, const vector[CRange]&) except +maml_v1_error nogil
 
 cdef extern from "maml/v1_pipeline.hpp" namespace "maml::v1" nogil:
     cdef cppclass CValue "maml::v1::Value":
@@ -124,14 +124,14 @@ cdef class NativePipeline:
         self.ptr=new CPipeline(text.encode())
     def __dealloc__(self):
         del self.ptr
-    def run(self, bytes data, uint64_t base, mapping, code, rodata, funcs):
+    def run(self, bytes data, uint64_t base, mapping, code, rodata, funcs, instructions):
         cdef map[uint64_t,uint64_t] mapper=mapping
         cdef const uint8_t* buf=data
         cdef CImage image=maml_v1_image(buf,len(data),base,mapper)
-        cdef vector[CRange] c=ranges(code), r=ranges(rodata), f=ranges(funcs)
+        cdef vector[CRange] c=ranges(code), r=ranges(rodata), f=ranges(funcs), ins=ranges(instructions)
         cdef CResult result
         with nogil:
-            result=maml_v1_pipeline_run(self.ptr[0],image,c,r,f)
+            result=maml_v1_pipeline_run(self.ptr[0],image,c,r,f,ins)
         return (result.is_matches, tuple(s.decode() for s in result.schema),
                 matches(result.matches), [value(v) for v in result.values],
                 [(t.stage.decode(),t.into,t.out) for t in result.trace])

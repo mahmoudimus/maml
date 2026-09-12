@@ -49,7 +49,7 @@ namespace {
     struct Manifest {
         bool ok = false;
         uint64_t size = 0; // 0 = the manifest did not say
-        std::vector<generate::Range> code, rodata, funcs;
+        std::vector<generate::Range> code, rodata, funcs, instructions;
         std::string error;
     };
 
@@ -79,6 +79,8 @@ namespace {
                 m.code.push_back({ a, b });
             } else if (got == 3 && k == "rodata") {
                 m.rodata.push_back({ a, b });
+            } else if (got == 3 && k == "instruction") {
+                m.instructions.push_back({ a, b });
             } else if (got == 3 && k == "func") {
                 m.funcs.push_back({ a, b });
             } else {
@@ -99,16 +101,16 @@ namespace {
         return img;
     }
 
-
     void usage() {
         fprintf(stderr,
             "usage: mamlpipe <image> --ranges <manifest> \"<pipeline>\" [--trace]\n"
             "       mamlpipe --batch <jobfile> --image <image> --ranges <manifest>\n"
             "\n"
             "stages: str(\"text\") | bytes(\"pattern\") | find(\"pattern\")\n"
+            "        | before(\"pattern\", within=N) | after(\"pattern\", within=N)\n"
             "        | capture(\"name\") | xrefs | callers | func | func:strict | func:loose\n"
             "        | unique | nth(N) | limit(N) | read(N),  composed with ->\n"
-            "manifest lines: size N | code A B | rodata A B | func A B\n");
+            "manifest lines: size N | code A B | rodata A B | func A B | instruction A B\n");
     }
 
 } // namespace
@@ -182,7 +184,7 @@ int main(int argc, char** argv) {
 
     auto execute = [&](const std::string& text, const std::string& name) {
         try {
-            const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.funcs);
+            const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.funcs, m.instructions);
             if (!name.empty())
                 printf("%s\t", name.c_str());
             printf("%s %s=%zu", result.ok() ? "OK" : "NONE", result.is_matches ? "matches" : "values",

@@ -99,7 +99,7 @@ def _matches(raw, schema):
 
 class Image:
     """Immutable byte snapshot with logical base, explicit pointer map, and RVA ranges."""
-    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), funcs=()):
+    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), funcs=(), instructions=()):
         self.data = bytes(data)
         self.base = _u64(base)
         self.pointer_map = {_u64(k):_u64(v) for k,v in (pointer_map or {}).items()}
@@ -113,6 +113,7 @@ class Image:
                 result.append((begin,end))
             return tuple(result)
         self.code, self.rodata, self.funcs = ranges(code), ranges(rodata), ranges(funcs)
+        self.instructions = ranges(instructions)
 
     @classmethod
     def from_file(cls, path, **kwargs):
@@ -180,7 +181,7 @@ class Pipeline:
     def run(self, image):
         is_matches,schema,raw,values,trace = _native(
             self._native.run, image.data, image.base, image.pointer_map,
-            image.code, image.rodata, image.funcs)
+            image.code, image.rodata, image.funcs, image.instructions)
         return PipelineResult('matches' if is_matches else 'values',schema,
                               tuple(_matches(raw,schema)),tuple(CaptureValue(*v) for v in values),
                               tuple(StageResult(*t) for t in trace))
@@ -232,6 +233,12 @@ class PipelineBuilder:
 
     def find(self, pattern):
         return self._append('find(' + _quote_pipeline_argument(pattern) + ')')
+
+    def before(self, pattern, *, within):
+        return self._append('before(' + _quote_pipeline_argument(pattern) + f', within={_u64(within)})')
+
+    def after(self, pattern, *, within):
+        return self._append('after(' + _quote_pipeline_argument(pattern) + f', within={_u64(within)})')
 
     def capture(self, name):
         return self._append('capture(' + _quote_pipeline_argument(name) + ')')

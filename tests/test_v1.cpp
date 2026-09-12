@@ -135,3 +135,20 @@ TEST_CASE("v1 pipeline builder quotes strings as data", "[v1][pipeline]") {
     REQUIRE(result.trace.size() == 2);
     REQUIRE_NOTHROW(PipelineBuilder().str("\n\t\x01").build());
 }
+
+TEST_CASE("v1 directional pipeline windows and builders", "[v1][pipeline]") {
+    using namespace maml::v1;
+    const std::array<uint8_t, 5> data{ 0xAA, 0x90, 0xCC, 0x90, 0xCC };
+    const Image image{ data };
+    const std::array<maml::generate::Range, 1> instructions{ { { 0, 2 } } };
+    auto before = PipelineBuilder().bytes("CC").before("AA [0..4]", 0).build().run(image);
+    REQUIRE(before.matches.size() == 1);
+    REQUIRE(before.matches[0].offset == 0);
+    auto query = PipelineBuilder().bytes("AA").after("CC", 2).build();
+    REQUIRE_THROWS_AS(query.run(image), Error);
+    auto after = query.run(image, {}, {}, {}, instructions);
+    REQUIRE(after.matches.size() == 2);
+    REQUIRE(after.matches[0].offset == 2);
+    REQUIRE(after.matches[1].offset == 4);
+    REQUIRE_THROWS_AS(Pipeline("bytes(\"AA\") -> before(\"CC\", within=-1)"), Error);
+}

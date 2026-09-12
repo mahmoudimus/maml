@@ -436,7 +436,27 @@ namespace maml::v1 {
             }
             return best;
         }
-        std::optional<Match> match_at(const Image& image, uint64_t start, size_t work_limit = 1000000) const {
+        // Conservative extent bound from compiled operations. Alternatives are
+        // overestimated by summing branches; followed references are unbounded.
+        uint64_t sequential_extent_bound() const {
+            uint64_t bound = 0;
+            for (const auto& i : code_) {
+                uint64_t width = 0;
+                if (i.op == detail::Op::Byte)
+                    width = 1;
+                else if (i.op == detail::Op::Gap)
+                    width = i.max;
+                else if (i.op == detail::Op::Reference) {
+                    if (i.continuation == Continuation::Target)
+                        return UINT64_MAX;
+                    width = i.reference.width();
+                }
+                if (!add(bound, width, bound))
+                    return UINT64_MAX;
+            }
+            return bound;
+        }
+        std::optional<Match> match_at(const Image& image, uint64_t start, size_t work_limit = 1000000, uint64_t end_min = 0, uint64_t end_max = UINT64_MAX) const {
             using detail::Op;
             if (start > image.bytes.size())
                 return std::nullopt;
@@ -457,6 +477,8 @@ namespace maml::v1 {
                     if (!add(image.base, s.cursor, address))
                         break;
                     if (i.op == Op::Accept) {
+                        if (s.cursor < end_min || s.cursor > end_max)
+                            break;
                         Match m{ start, schema_, {} };
                         for (size_t k = 0; k < schema_.size(); ++k)
                             if (s.captures[k])

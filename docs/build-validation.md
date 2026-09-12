@@ -57,3 +57,20 @@ CLI smoke checks resolved a followed reference with a nibble wildcard through
 `mamlscan --dialect maml-v1`, and ran builder-generated and multiline source
 through `mamlpipe --dialect maml-v1` with named projection and `func:strict`.
 The installed-package and sanitizer results above predate this builder addition.
+
+## Directional pipelines
+
+On the checkout based on `e972280`, after rebuilding C++ tools and the Cython
+extension, directional pipeline verification passed: 205 Python tests, 129 C++
+cases (788 assertions), and all 60 existing conformance vectors. The 12 dedicated
+Python directional tests cover both window directions, exact boundaries,
+multiple results, base addresses, capture schemas, gap/alternative backtracking,
+followed-reference endpoints, large-image bounded searches, invalid arguments,
+and instruction metadata. CLI smoke checks returned two `after` matches and one
+adjacent `before` match using an `instruction A B` manifest entry.
+
+The conformance JSONL vectors still cover the existing matcher/projection
+protocol; directional pipeline behavior is covered by the C++ and Python tests,
+not those 60 vectors. Older test totals above predate removal of the unversioned
+dialect. Installed-wheel and sanitizer verification were not repeated for this
+change.

@@ -312,3 +312,14 @@ regardless of their originating tool. Existing v1 conformance remains required.
 Before implementation, settle the concrete normalized schema, conservative unknown
 policy, verification modes, and deterministic ranking order. These API choices
 must not relax the semantic requirements above.
+
+## Directional-stage implementation update
+
+`before(pattern, within=N)` and `after(pattern, within=N)` are now pipeline
+operations available to future synthesis templates. Their normative grammar,
+window boundaries, capture schema, and instruction-range requirements are
+documented in the README's Directional searches section. They return all
+matching starts, not a nearest-only selection. The analysis snapshot's instruction
+ranges can supply `after` boundaries; no concrete analysis adapter is implemented
+by this addition. Automatic discovery or ranking of directional templates remains
+future work.

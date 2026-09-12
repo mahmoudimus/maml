@@ -78,7 +78,7 @@ immutable dictionary of present captures. `capture(name)` returns a
 `CaptureValue(value, kind, space)` or `None` for a declared absent capture;
 unknown names raise `SchemaError`.
 
-`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), funcs=())` takes an
+`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), funcs=(), instructions=())` takes an
 immutable byte snapshot. Ranges are half-open buffer offsets, supplied as
 `(begin, end)` pairs or `maml.Range` objects. Captured cursor and relative
 addresses include `base`; match offsets do not. `pointer_map` explicitly maps
@@ -115,6 +115,8 @@ be shared between threads.
 | `str("text")` | Exact indexed string addresses; requires rodata |
 | `bytes("pattern")` | Match records across the image |
 | `find("pattern")` | Match records starting within enclosing functions; requires function ranges |
+| `before("pattern", within=N)` | All matches ending 0..N bytes before each anchor |
+| `after("pattern", within=N)` | All matches starting 0..N bytes after each anchor instruction ends |
 | `capture("name")` | Present named values, deduplicated by value, kind, and space |
 | `xrefs` | Indexed reference sites; requires code and target classification |
 | `func` | Enclosing function entries; requires function ranges |
@@ -157,6 +159,75 @@ captures raise `SchemaError`, and failed `unique` raises `CardinalityError`.
 Missing metadata and resource exhaustion raise `ExecutionError`. Compiler
 errors carry a `code` and native parser `position`. C++ reports `maml::v1::Error`
 with the same code and position.
+
+### Directional searches
+
+```text
+str("ClearScripts")
+    -> xrefs
+    -> before("E8 rel32(callee)", within=32)
+```
+
+This returns all matching call-site records, sorted by offset. It does not select
+only the nearest call. `within` is required, is an unsigned 64-bit integer, and
+measures the intervening byte distance, inclusively. `within=0` requires
+adjacency. Append `-> capture("callee")` to project called targets; append
+`-> unique` at the desired stage to require one match or one projected value.
+
+The grammar additions are:
+
+```text
+directional_stage := ("before" | "after") "(" quoted_pattern "," "within" "=" uint64 ")"
+```
+
+For an anchor offset `A`, `before` accepts a match whose final cursor `E`
+satisfies `E <= A` and `A - E <= within`. Its start may precede the window by
+the pattern's length. End bounds participate in backtracking: an alternative or
+gap may try another path when its first endpoint is outside the window.
+
+For an anchor instruction range `[A, B)`, `after` accepts starts `S` satisfying
+`S >= B` and `S - B <= within`. The matched pattern may extend beyond the window.
+Supply instruction ranges via Python `v1.Image(..., instructions=[(A, B)])`, the
+fifth argument to C++ `Pipeline::run(image, code, rodata, funcs, instructions)`,
+or `instruction A B` lines in the `mamlpipe` manifest. These ranges are half-open
+buffer offsets, not virtual addresses. `after` requires a known instruction at
+every input anchor and raises `MissingMetadata` otherwise; it does not guess a
+length from the pattern that produced the anchor. Conflicting lengths, empty
+instruction ranges, and ranges outside the image are errors.
+
+Both stages use record offsets or image-address values as anchors, replace the
+capture schema with the searched pattern's schema, and preserve captures from
+successful paths. Scalars and unmapped absolute-pointer values are invalid
+anchors. Results are deduplicated by match start and sorted ascending. For a start
+eligible through multiple anchors, ascending anchor order determines the first
+successful path; each start yields at most one record, as in ordinary scanning.
+Empty input produces empty output. Zero-width patterns may match at image edges.
+
+Searches use the full image address space and do not implicitly stop at function
+or basic-block boundaries. They match bytes, not decoded call instructions.
+Explicit `:follow` remains supported: for `before`, the endpoint is the final
+cursor after following, not a contiguous source extent. The full matched path
+need not lie inside the byte window. Use sequential patterns for ordinary local
+call-site searches.
+
+Directional stages allow at most 1,000,000 candidate-start attempts per stage,
+with existing per-match execution limits. Exceeding the budget raises
+`ResourceLimit`, not a partial successful result. Sequential extent bounds come
+from the compiled IR; followed patterns may require a broader search.
+
+Equivalent builder calls:
+
+```python
+query = (v1.PipelineBuilder().str("ClearScripts").xrefs()
+         .before("E8 rel32(callee)", within=32).build())
+# .after("E8 rel32(callee)", within=32) requires anchor instruction ranges.
+```
+
+```cpp
+const auto query = maml::v1::PipelineBuilder().str("ClearScripts").xrefs()
+    .before("E8 rel32(callee)", 32).build();
+// .after("E8 rel32(callee)", 32) requires anchor instruction ranges.
+```
 
 ### Multiline pipelines and declarative builders
 

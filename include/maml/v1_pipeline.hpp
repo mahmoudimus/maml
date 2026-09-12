@@ -56,7 +56,8 @@ namespace maml::v1 {
                     ++p;
                 Stage s;
                 s.name = std::string(source.substr(begin, p - begin));
-                const bool text = s.name == "str" || s.name == "bytes" || s.name == "find" || s.name == "capture";
+                const bool directional = s.name == "before" || s.name == "after";
+                const bool text = directional || s.name == "str" || s.name == "bytes" || s.name == "find" || s.name == "capture";
                 const bool numeric = s.name == "nth" || s.name == "limit" || s.name == "read";
                 if (text || numeric) {
                     need('(');
@@ -104,6 +105,21 @@ namespace maml::v1 {
                         if (s.name == "read" && s.number != 1 && s.number != 2 && s.number != 4 && s.number != 8)
                             throw Error("InvalidArgument", "read width must be 1, 2, 4, or 8", p);
                     }
+                    if (directional) {
+                        need(',');
+                        ws();
+                        if (source.substr(p, 6) != "within")
+                            throw Error("InvalidArgument", "Expected within=N", p);
+                        p += 6;
+                        need('=');
+                        ws();
+                        size_t start = p;
+                        while (p < source.size() && std::isdigit(static_cast<unsigned char>(source[p])))
+                            ++p;
+                        auto parsed = std::from_chars(source.data() + start, source.data() + p, s.number);
+                        if (start == p || parsed.ec != std::errc{})
+                            throw Error("InvalidArgument", "within must be an unsigned 64-bit integer", start);
+                    }
                     need(')');
                 } else if (s.name != "xrefs" && s.name != "func" && s.name != "callers" && s.name != "unique")
                     throw Error("InvalidSyntax", "Unknown pipeline stage: " + s.name, p);
@@ -126,7 +142,7 @@ namespace maml::v1 {
                 const bool seed = s.name == "str" || s.name == "bytes";
                 if (seed != stages_.empty())
                     throw Error("InvalidSyntax", "A pipeline must start with exactly one source", begin);
-                if (s.name == "bytes" || s.name == "find") {
+                if (s.name == "bytes" || s.name == "find" || directional) {
                     s.pattern.emplace(s.argument);
                     schema = s.pattern->schema();
                     matches = true;
@@ -150,7 +166,16 @@ namespace maml::v1 {
             }
         }
         PipelineResult run(const Image& image, std::span<const maml::generate::Range> code = {},
-            std::span<const maml::generate::Range> rodata = {}, std::span<const maml::generate::Range> funcs = {}) const {
+            std::span<const maml::generate::Range> rodata = {}, std::span<const maml::generate::Range> funcs = {},
+            std::span<const maml::generate::Range> instructions = {}) const {
+            std::map<uint64_t, uint64_t> instruction_ends;
+            for (auto ins : instructions) {
+                if (ins.begin >= ins.end || ins.end > image.bytes.size())
+                    throw Error("InvalidArgument", "Invalid instruction range");
+                auto [it, inserted] = instruction_ends.emplace(ins.begin, ins.end);
+                if (!inserted && it->second != ins.end)
+                    throw Error("InvalidArgument", "Conflicting instruction lengths");
+            }
             maml::generate::Image indexed{ image.bytes, code, rodata, funcs };
             PipelineResult r;
             auto count = [&] {
@@ -219,6 +244,43 @@ namespace maml::v1 {
                         for (const auto& str : maml::generate::strings(indexed))
                             if (str.len == s.argument.size() && std::equal(s.argument.begin(), s.argument.end(), image.bytes.begin() + ptrdiff_t(str.rva)))
                                 r.values.push_back(address(str.rva));
+                    } else if (s.name == "before" || s.name == "after") {
+                        std::set<uint64_t> emitted;
+                        size_t attempts = 0;
+                        std::sort(inputs.begin(), inputs.end());
+                        inputs.erase(std::unique(inputs.begin(), inputs.end()), inputs.end());
+                        for (auto anchor : inputs) {
+                            if (anchor > image.bytes.size())
+                                throw Error("InvalidArgument", "Anchor outside image");
+                            uint64_t lo = 0, hi = anchor, end_min = 0, end_max = image.bytes.size();
+                            if (s.name == "before") {
+                                end_min = anchor > s.number ? anchor - s.number : 0;
+                                end_max = anchor;
+                                const auto extent = s.pattern->sequential_extent_bound();
+                                lo = end_min > extent ? end_min - extent : 0;
+                            } else {
+                                auto ins = instruction_ends.find(anchor);
+                                if (ins == instruction_ends.end())
+                                    throw Error("MissingMetadata", "after requires an instruction range at every anchor");
+                                lo = ins->second;
+                                hi = lo + std::min<uint64_t>(s.number, image.bytes.size() - lo);
+                            }
+                            for (uint64_t at = lo; at <= hi; ++at) {
+                                if (emitted.contains(at))
+                                    continue;
+                                if (++attempts > 1000000)
+                                    throw Error("ResourceLimit", "Directional search exceeds 1000000 start attempts");
+                                if (auto m = s.pattern->match_at(image, at, 1000000, end_min, end_max)) {
+                                    emitted.insert(at);
+                                    r.matches.push_back(std::move(*m));
+                                }
+                            }
+                        }
+                        std::sort(r.matches.begin(), r.matches.end(), [](const Match& a, const Match& b) {
+                            return a.offset < b.offset;
+                        });
+                        r.is_matches = true;
+                        r.schema = s.pattern->schema();
                     } else if (s.name == "find") {
                         if (funcs.empty())
                             throw Error("MissingMetadata", "find requires function ranges");
@@ -338,6 +400,12 @@ namespace maml::v1 {
         }
         PipelineBuilder find(std::string_view text) const {
             return append("find(" + quote(text) + ")");
+        }
+        PipelineBuilder before(std::string_view pattern, uint64_t within) const {
+            return append("before(" + quote(pattern) + ", within=" + std::to_string(within) + ")");
+        }
+        PipelineBuilder after(std::string_view pattern, uint64_t within) const {
+            return append("after(" + quote(pattern) + ", within=" + std::to_string(within) + ")");
         }
         PipelineBuilder capture(std::string_view name) const {
             return append("capture(" + quote(name) + ")");
