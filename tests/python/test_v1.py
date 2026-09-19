@@ -142,26 +142,13 @@ def test_captures_and_checkpoints_are_bounded():
         v1.Pattern('[0..4096] AA').match_at(v1.Image(bytes(4097)))
 
 
-def test_native_cli_dialect_selection(tmp_path):
+def test_native_cli_dialect_selection(tmp_path, cli_executable):
     import subprocess
-    v1=api()
-    root=Path(__file__).parents[2]
-    def exe(name):
-        candidates=[root/'build'/name,root/'build'/(name+'.exe'),root/'build/Release'/(name+'.exe'),root/'build/Debug'/(name+'.exe')]
-        import os
-        override=os.environ.get('MAML_SCAN' if name=='mamlscan' else 'MAML_PIPE')
-        if override:
-            assert Path(override).is_file(), f'Invalid CLI override: {override}'
-            return override
-        found=next((p for p in candidates if p.is_file()),None)
-        if found is None:
-            pytest.skip(f'Build {name} to run native CLI integration')
-        return str(found)
     image=tmp_path/'image.bin'; image.write_bytes(bytes.fromhex('E8 01 00 00 00 90 CC'))
     ranges=tmp_path/'ranges.txt'; ranges.write_text('size 7\ncode 0 7\nfunction 0 0 7\n')
-    scan=subprocess.run([exe('mamlscan'),str(image),'E8 rel32(x):follow CC','--capture','x'],capture_output=True,text=True)
+    scan=subprocess.run([cli_executable('mamlscan'),str(image),'E8 rel32(x):follow CC','--capture','x'],capture_output=True,text=True)
     assert scan.returncode==0,scan.stderr+scan.stdout
     assert '6' in scan.stdout
-    pipe=subprocess.run([exe('mamlpipe'),str(image),'--ranges',str(ranges),'bytes("E8 rel32(x)") -> capture("x") -> unique'],capture_output=True,text=True)
+    pipe=subprocess.run([cli_executable('mamlpipe'),str(image),'--ranges',str(ranges),'bytes("E8 rel32(x)") -> capture("x") -> unique'],capture_output=True,text=True)
     assert pipe.returncode==0,pipe.stderr+pipe.stdout
     assert 'ResolvedRelativeTarget' in pipe.stdout and '6' in pipe.stdout

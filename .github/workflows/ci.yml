@@ -122,7 +122,7 @@ jobs:
     - name: Run the suite, with nothing allowed to skip
       shell: bash
       run: |
-        out=$(python -m pytest tests/python -q -o pythonpath= 2>&1)
+        out=$(python -m pytest tests/python -q -rs -o pythonpath= 2>&1)
         echo "$out"
         case "$out" in
           *skipped*) echo "::error::a test skipped; every dependency is installed, so nothing should"; exit 1 ;;

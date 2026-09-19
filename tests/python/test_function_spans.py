@@ -199,14 +199,9 @@ def test_invalid_primary_unwind_does_not_promote_its_child(defect):
     assert functions_from_pdata(raw, [Range(0x100, 0x140)], data) == []
 
 
-def test_cli_rejects_range_only_function_manifest(tmp_path):
-    import os
-    from pathlib import Path
+def test_cli_rejects_range_only_function_manifest(tmp_path, cli_executable):
     import subprocess
-    root = Path(__file__).resolve().parents[2]
-    cli = Path(os.environ.get('MAML_PIPE', root / 'build' / 'mamlpipe'))
-    if not cli.is_file():
-        pytest.skip('Build mamlpipe to run native CLI integration')
+    cli = cli_executable('mamlpipe')
     image = tmp_path / 'image.bin'
     image.write_bytes(b'\xAA\xBB')
     manifest = tmp_path / 'ranges.txt'
