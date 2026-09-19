@@ -88,3 +88,16 @@ start at offset zero for `str("ClearScripts", match="contains") -> unique`.
 The existing JSONL vectors do not cover pipeline operations; those are tested
 through the C++ and Python suites. No installed-wheel or sanitizer rerun was
 performed for this change.
+
+## Contiguous PE chained-unwind coverage
+
+All 223 Python tests passed after adding 10 chained-coverage regressions. The
+fixtures include the reported 69893 parent `[0x28292D0, 0x2829305)`, chained
+fragment `[0x2829305, 0x282A2A6)`, and xref `0x2829B93`. The parser now yields
+the single contiguous parent range through `0x282A2A6`. Separate execution
+fixtures verify `func`, `func:strict`, and `find` within the extended tail.
+Odd/even unwind-code padding, nested chains, table ordering, duplicates, bad
+links, cycles, truncation, incompatible flags, executable coverage, and
+conflicting primary entries are tested. Disconnected coverage is deliberately
+not coalesced across gaps. These are synthetic fixtures; the actual 69893 PE
+was not supplied or executed. No C++ runtime or binding changes were needed.

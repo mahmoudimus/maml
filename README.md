@@ -773,6 +773,19 @@ not infer a pipeline from an image.
 ## Generating and resolving patterns
 
 The generator takes an image plus code, rodata, and optional function ranges.
+The Python PE loader resolves x64 `UNW_FLAG_CHAININFO` parent records and merges
+contiguous chained coverage into the primary function's range. Fragments do not
+become separate entries: `func` maps their addresses to the parent, and `find`
+searches the extended range. Nested chains and padded unwind-code arrays are
+handled; invalid links, cycles, truncated chain records, and extensions over
+another primary function are not used to expand coverage.
+
+The current function API still holds one contiguous range per entry. Disconnected
+chained spans are omitted, not joined across gaps; representing those spans needs
+an entry-plus-spans API. This fixes contiguous chained tails without claiming
+complete hot/cold-split coverage. Unwind tables also need not enumerate every
+function, including leaf functions without unwind records.
+
 Ranges are image-relative and half-open. Supplied function ranges must already
 represent actual functions rather than unresolved chained unwind fragments.
 Without function ranges, generation uses bounded byte windows where supported;

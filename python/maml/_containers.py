@@ -20,7 +20,7 @@ UNW_FLAG_CHAININFO = 0x4
 
 
 def funcs_from_pdata(raw, code, buf):
-    """Function starts from a raw .pdata blob.
+    """Primary function ranges with contiguous resolved chained coverage.
 
     Extracted so it is testable without building a PE: every defect found here
     -- the name-based filter, the missing chain resolution -- needed a specific
@@ -30,38 +30,78 @@ def funcs_from_pdata(raw, code, buf):
     (`<III` = begin RVA, end RVA, unwind-info RVA). `code` is the executable
     ranges; `buf` is the whole RVA-indexed image, needed to read unwind info.
     """
+    import bisect
     import struct
+    records = set()
+    for off in range(0, len(raw) - 11, 12):
+        record = struct.unpack_from("<III", raw, off)
+        begin, end, _ = record
+        if (0 <= begin < end <= len(buf)
+                and any(c.begin <= begin < c.end for c in code)):
+            records.add(record)
+
+    # Win64 UNWIND_INFO stores CountOfCodes two-byte slots after its four-byte
+    # header. Round the slot count up to an even number before reading the
+    # embedded RUNTIME_FUNCTION. It may itself point to another chained record.
+    parents = {}
+    roots = set()
+    for record in records:
+        begin, end, unwind = record
+        flags = buf[unwind] >> 3 if unwind < len(buf) else 0
+        if not flags & UNW_FLAG_CHAININFO:
+            roots.add(record)
+            continue
+        parents[record] = None
+        if (unwind + 4 > len(buf) or (buf[unwind] & 7) not in (1, 2)
+                or flags & ~UNW_FLAG_CHAININFO):
+            continue
+        tail = unwind + 4 + 2 * ((buf[unwind + 2] + 1) & ~1)
+        if tail + 12 > len(buf):
+            continue
+        parent = struct.unpack_from("<III", buf, tail)
+        # Only attach coverage to an actual table record. Invalid links never
+        # turn fragments into independent function starts.
+        if parent in records and any(c.begin <= begin < end <= c.end for c in code):
+            parents[record] = parent
+
+    resolved = {root: root for root in roots}
+    for record in records:
+        path, seen = [], set()
+        current = record
+        while current is not None and current not in resolved and current not in seen:
+            seen.add(current)
+            path.append(current)
+            current = parents.get(current)
+        root = resolved.get(current)
+        for item in path:
+            resolved[item] = root
+
+    spans = {root: [] for root in roots}
+    for record, root in resolved.items():
+        if root is not None:
+            spans[root].append(record[:2])
+
+    # Existing consumers accept one contiguous range per function. Coalesce
+    # only connected coverage after the real entry, never a bounding box over
+    # a gap or an interval owned by another primary function.
+    ordered_roots = sorted(roots)
+    starts = [r[0] for r in ordered_roots]
+    max_ends = []
+    for _, end, _ in ordered_roots:
+        max_ends.append(max(end, max_ends[-1] if max_ends else 0))
     out = []
-    n = (len(raw) // 12) * 12          # whole records only
-    for off in range(0, n, 12):
-        begin, fend, unwind = struct.unpack_from("<III", raw, off)
-        if begin == 0 and fend == 0:
-            continue
-        # Inside any EXECUTABLE range, not inside a section literally named
-        # ".text". Keying on the name meant a PE whose executable section is
-        # called something else disabled the filter entirely -- a record
-        # pointing outside every section was accepted -- while a PE with .text
-        # plus a second executable section silently dropped every function in
-        # the second one.
-        if not any(c.begin <= begin < c.end for c in code):
-            continue
-        if fend <= begin or fend > len(buf):
-            continue
-        # CHAIN RESOLUTION. generate.hpp states this as a precondition in bold:
-        # UNW_FLAG_CHAININFO fragments are NOT function starts, "a trap this
-        # project walked into four separate times". A hot/cold-split function
-        # has several .pdata records and only one is the entry; admitting the
-        # fragments makes enclosing_func() report a fragment as the function,
-        # so StringAnchor's depth-0 test fails whenever a lea and its target
-        # land in different fragments of one real function, and clamp_to_func
-        # truncates tails at fragment boundaries. Silently weaker patterns, on
-        # exactly the optimised MSVC binaries this tool exists for.
-        #
-        # UNWIND_INFO byte 0 is Version:3 | Flags:5. The parent's own record is
-        # already in this table, so dropping the fragment loses nothing.
-        if unwind < len(buf) and ((buf[unwind] >> 3) & UNW_FLAG_CHAININFO):
-            continue
-        out.append(Range(begin=begin, end=fend, name="", executable=True))
+    for root in ordered_roots:
+        begin, end, _ = root
+        for lo, hi in sorted(spans[root]):
+            if lo < begin or lo > end or hi <= end:
+                continue
+            index = bisect.bisect_left(starts, hi) - 1
+            if index >= 0 and max_ends[index] > end:
+                # Includes another root whose original coverage intersects
+                # the proposed extension; fail closed on conflicting ownership.
+                continue
+            end = hi
+        out.append(Range(begin=begin, end=end, name="", executable=True))
     return out
 
 
@@ -78,8 +118,9 @@ def flatten_pe(path):
 
     `funcs` comes from `.pdata` when the PE has one: an array of 12-byte
     RUNTIME_FUNCTION records (`<III` = begin RVA, end RVA, unwind-info RVA),
-    filtered to entries whose begin address falls inside `.text` -- that gives
-    a complete function list with no symbols needed. `.pdata` is x64-specific
+    filtered to executable ranges. Valid contiguous chained spans extend their
+    primary entry's coverage; disconnected spans are not yet representable.
+    This is unwind-derived coverage, not a complete function list. `.pdata` is x64-specific
     (table-based SEH) and PE32 images do not have one; `funcs` is left empty
     when it is absent, which is a documented no-op for maml.generate, not
     a failure.
