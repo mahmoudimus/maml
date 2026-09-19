@@ -342,9 +342,23 @@ namespace maml::v1 {
                             throw Error("MissingMetadata", s.name + " requires code ranges");
                         std::unordered_set<uint64_t> targets;
                         for (auto at : inputs) {
-                            if (s.name == "callers" || in(code, at)) {
+                            if (s.name == "callers") {
                                 for (auto site : maml::generate::callers_of(indexed, at))
                                     r.values.push_back(address(site));
+                            } else if (in(code, at)) {
+                                // A code target is referenced two ways: it is
+                                // CALLED, or its ADDRESS IS TAKEN. `callers`
+                                // means the first; `xrefs` means both. Only
+                                // consulting the call graph here silently lost
+                                // every `lea reg, <function>` -- the shape a
+                                // callback registration uses, where the
+                                // registrar never calls the function it is
+                                // handed. rip_lea_index makes no assumption
+                                // about the target's kind, so both sources
+                                // apply.
+                                for (auto site : maml::generate::callers_of(indexed, at))
+                                    r.values.push_back(address(site));
+                                targets.insert(at);
                             } else if (in(rodata, at))
                                 targets.insert(at);
                             else

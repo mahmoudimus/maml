@@ -152,3 +152,24 @@ def test_native_cli_dialect_selection(tmp_path, cli_executable):
     pipe=subprocess.run([cli_executable('mamlpipe'),str(image),'--ranges',str(ranges),'bytes("E8 rel32(x)") -> capture("x") -> unique'],capture_output=True,text=True)
     assert pipe.returncode==0,pipe.stderr+pipe.stdout
     assert 'ResolvedRelativeTarget' in pipe.stdout and '6' in pipe.stdout
+
+
+def test_xrefs_on_code_target_includes_address_taken_refs():
+    """`callers` is calls; `xrefs` is calls AND address-taken references.
+
+    A callback registration hands a function's ADDRESS to a registrar that
+    never calls it, so a call-graph-only answer misses the site entirely.
+    """
+    v1 = api()
+    data = bytes.fromhex(
+        "4831C0C3" + "90" * 12 +      # 0x00  target: xor rax,rax; ret + padding
+        "E8EBFFFFFF" +                # 0x10  call  target
+        "4C8D0DE4FFFFFF" +            # 0x15  lea r9, target
+        "C3")                         # 0x1C  ret
+    image = v1.Image(data, code=[(0, len(data))],
+                     functions=[Function(0, [(0, 4)]),
+                                Function(0x10, [(0x10, len(data))])])
+    callers = v1.Pipeline('bytes("48 31 C0 C3") -> func -> callers').run(image)
+    xrefs = v1.Pipeline('bytes("48 31 C0 C3") -> func -> xrefs').run(image)
+    assert [v.value for v in callers.values] == [0x10]
+    assert [v.value for v in xrefs.values] == [0x10, 0x15]

@@ -540,7 +540,7 @@ bytes "48 89 5C 24 08 57" -> func -> callers -> nth 0
 | `str "text"` | Source; requires rodata ranges | Starts of matching NUL-terminated strings in the derived string table |
 | `bytes "pattern"` | Source | Pattern match offsets across the entire image |
 | `find "pattern"` | Addresses; requires function ranges | Matches within each enclosing function, or the first capture when the pattern contains `'` |
-| `xref` | Addresses covered by code or rodata ranges; requires code ranges | Call sites for code targets, or indexed RIP-relative reference sites for rodata targets |
+| `xref` | Addresses covered by code or rodata ranges; requires code ranges | Direct call and indexed RIP-relative LEA sites for code targets; indexed RIP-relative LEA sites for rodata targets |
 | `callers` | Target addresses; requires code ranges | Direct call sites targeting those addresses |
 | `func` | Addresses; requires function ranges | Enclosing function entries; addresses outside known functions are dropped |
 | `func:loose` | Same as `func` | Explicit spelling of the default behavior |
@@ -568,9 +568,12 @@ to a `find` pattern changes its output to the first capture. These current
 constraints must not be confused with v1's explicit match-record projection.
 
 `xref` is an indexed byte-analysis operation, not a complete disassembler xref
-query. On a code target it uses the call graph, so a `lea` taking a function's
-address is not found through that route. A target in neither code nor rodata
-is an error rather than an assumed data reference.
+query. For a code target, `xrefs` returns the union of direct E8 call sites and supported
+RIP-relative LEA sites taking its address; `callers` returns only direct call
+sites. Rodata targets retain indexed RIP-relative LEA lookup. Results are sorted
+and deduplicated. A target in neither code nor rodata is an error rather than an
+assumed data reference. This expansion can change `nth(0)` selection or make
+`xrefs -> unique` fail; use `callers` when only direct calls are intended.
 
 `func` locates an enclosing entry; it does not prove that its input was already
 an entry. Use `func:strict` to assert that property, and inspect `trace.moved`.
@@ -821,6 +824,11 @@ candidate manually. Resolution never guesses the dialect from pattern text.
 The [future generation design](docs/generation-design.md) specifies analysis
 adapters, wildcard constraints, additional strategies, and verification contracts.
 It is a proposal, not a description of implemented APIs.
+
+The [code-reference proposal](docs/xrefs-proposal.md) describes the extension of `xrefs`
+to include address-taking LEAs for code targets while keeping `callers` limited
+to direct calls. It covers callback registration, compatibility, and acceptance
+cases without introducing a modifier.
 
 The current strategies are `Body`, `Xref` (direct calls), `StringAnchor`
 (including a nearby call anchor), and `RipRef`. Cross-build verification can
