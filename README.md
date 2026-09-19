@@ -78,7 +78,7 @@ immutable dictionary of present captures. `capture(name)` returns a
 `CaptureValue(value, kind, space)` or `None` for a declared absent capture;
 unknown names raise `SchemaError`.
 
-`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), funcs=(), instructions=())` takes an
+`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), functions=(), instructions=())` takes an
 immutable byte snapshot. Ranges are half-open buffer offsets, supplied as
 `(begin, end)` pairs or `maml.Range` objects. Captured cursor and relative
 addresses include `base`; match offsets do not. `pointer_map` explicitly maps
@@ -103,8 +103,9 @@ int main() {
 
 C++ images borrow their backing bytes. `Image::pointer_map` maps absolute values
 to logical addresses. `Pattern::match_at`, `find`, and `find_all` mirror the
-Python operations. `Pipeline::run(image, code, rodata, funcs)` accepts spans of
-`maml::generate::Range` for metadata. Keep backing bytes and ranges alive and
+Python operations. `Pipeline::run(image, code, rodata, functions)` accepts spans of
+`maml::generate::Range` for section metadata and `maml::generate::Function` for
+functions. Keep backing bytes and ranges alive and
 unchanged during calls. Compiled patterns and pipelines are immutable and can
 be shared between threads.
 
@@ -160,6 +161,77 @@ captures raise `SchemaError`, and failed `unique` raises `CardinalityError`.
 Missing metadata and resource exhaustion raise `ExecutionError`. Compiler
 errors carry a `code` and native parser `position`. C++ reports `maml::v1::Error`
 with the same code and position.
+
+### Function entries and coverage spans
+
+For noncontiguous functions, use `Function(entry, spans)` instead of declaring
+each fragment as a separate function:
+
+```python
+from maml import Function, Image, Pipeline
+
+image = Image(data, functions=[
+    Function(0x100, [(0x100, 0x120), (0x200, 0x240)]),
+    Function(0x180, [(0x180, 0x190)]),  # a different function in the gap
+])
+result = Pipeline('bytes("AB CD") -> func -> find("48 85 C0")').run(image)
+```
+
+Entries and span endpoints are buffer-relative offsets, even for an image with a
+nonzero base. Python stores immutable `Function` records, sorts spans, and merges
+adjacent or overlapping spans belonging to the same entry. Image construction
+rejects duplicate entries, cross-function overlaps, out-of-image spans, and an
+entry not covered by its own spans. A separated fragment may precede its entry.
+
+`func` maps an address in any owned span to the entry; gaps remain uncovered.
+`func:strict` accepts only real entries, including when a fragment starts at a
+valid instruction boundary. `find` searches eligible starts in **all spans** of
+each selected function, deduplicating starts. Its existing start-scoped semantics
+remain unchanged: matched bytes or explicit `:follow` destinations can leave a
+span, but gaps do not become eligible starting positions.
+
+C++ uses owning `generate::Function` records and borrowed spans at execution:
+
+```cpp
+const std::array<maml::generate::Function, 1> functions{{
+    {0x100, {{0x100, 0x120}, {0x200, 0x240}}}
+}};
+auto result = query.run(image, code, rodata, functions);
+// Arguments: image, code, rodata, functions, instructions.
+maml::generate::Image generation_image{bytes, code, rodata, functions};
+```
+
+C++ span records must be nonempty, in bounds, and nonoverlapping; adjacent spans
+are allowed. Keep function records and their backing spans alive during calls.
+Generation uses shared ownership lookup and clamps sequential byte runs to the
+containing span. A string anchor in a separated tail can belong to the same entry
+as its target; that does not permit literal patterns to bridge uncovered gaps.
+
+`functions` is the only function metadata collection in Python and C++.
+`Image.from_pe()` resolves chained unwind records to their outermost entry and
+retains every owned span, including noncontiguous tails. Chains use cycle
+detection rather than a fixed hop limit; malformed links never promote a
+fragment to a callable entry. This metadata does not enumerate PE leaf functions
+that have no `.pdata` records.
+
+`flatten_pe(path)` returns exactly five items: `(data, sections, code, rodata,
+functions)`. The former range-only input and optional loader result shapes are
+removed. Rebuild native C++/Cython consumers and migrate callers to
+`Function(entry, spans)`; a contiguous function has one span.
+
+CLI manifests use repeated decimal `function ENTRY BEGIN END` records:
+
+```text
+function 256 256 288
+function 256 512 576
+function 384 384 400
+```
+
+These describe two spans owned by entry 256 and one separate function at 384.
+`mamlpipe` merges same-entry spans and rejects conflicting ownership. The old
+`func BEGIN END` format is rejected. The durability flattener uses the shared PE
+loader and emits the same full span records; measurement and resolution sample
+each entry once.
 
 ### String matching modes
 
@@ -235,7 +307,7 @@ gap may try another path when its first endpoint is outside the window.
 For an anchor instruction range `[A, B)`, `after` accepts starts `S` satisfying
 `S >= B` and `S - B <= within`. The matched pattern may extend beyond the window.
 Supply instruction ranges via Python `v1.Image(..., instructions=[(A, B)])`, the
-fifth argument to C++ `Pipeline::run(image, code, rodata, funcs, instructions)`,
+fifth argument to C++ `Pipeline::run(image, code, rodata, functions, instructions)`,
 or `instruction A B` lines in the `mamlpipe` manifest. These ranges are half-open
 buffer offsets, not virtual addresses. `after` requires a known instruction at
 every input anchor and raises `MissingMetadata` otherwise; it does not guess a
@@ -313,7 +385,7 @@ const auto query = maml::v1::Pipeline(R"pipeline(
         -> capture("init")
         -> unique
 )pipeline");
-// auto result = query.run(image, code, rodata, funcs);
+// auto result = query.run(image, code, rodata, functions);
 ```
 
 The equivalent Python builder avoids textual separators:
@@ -347,7 +419,7 @@ const auto query = maml::v1::PipelineBuilder()
     .capture("init")
     .unique()
     .build();
-// auto result = query.run(image, code, rodata, funcs);
+// auto result = query.run(image, code, rodata, functions);
 ```
 
 Both builders also expose `bytes`, `callers`, `nth`, `limit`, and `read`.
@@ -543,11 +615,11 @@ movement counts in the trace.
 This Python example is self-contained and works with the current runtime:
 
 ```python
-from maml import Image, Range, pipeline
+from maml import Function, Image, Range, pipeline
 
 img = Image.from_bytes(bytes.fromhex("90 F7 80 58 1C 00 00 90"))
 img.code = [Range(0, 8)]
-img.funcs = [Range(0, 8)]
+img.functions = [Function(0, [(0, 8)])]
 r = pipeline.run(img,
     "bytes \"F7 80\" -> func -> find \"F7 80 ' ? ? 00 00\" -> read 4")
 assert r.ok and r.kind == "value" and r.values == [0x1C58]
@@ -566,11 +638,12 @@ In C++, include the pipeline header explicitly:
 
 int main() {
     const std::array<uint8_t, 8> bytes{0x90, 0xF7, 0x80, 0x58, 0x1C, 0, 0, 0x90};
-    const std::array<maml::generate::Range, 1> funcs{{{0, 8}}};
+    const std::array<maml::generate::Range, 1> code{{{0, 8}}};
+    const std::array<maml::generate::Function, 1> functions{{{0, {{0, 8}}}}};
     maml::v1::Image image{bytes};
     const auto r = maml::v1::Pipeline(
         "bytes(\"F7 80\") -> func -> find(\"F7 80 @(x) ?? ?? 00 00\") -> read(4)")
-        .run(image, funcs, {}, funcs);
+        .run(image, code, {}, functions);
     return r.ok() && !r.is_matches && r.values.size() == 1 &&
            r.values[0].value == 0x1C58 ? 0 : 1;
 }
@@ -691,7 +764,7 @@ def call_image(target, site, tail):
     data = bytearray(b"\xCC" * 256)
     data[site:site + 5] = b"\xE8" + (target - site - 5).to_bytes(4, "little", signed=True)
     data[site + 5:site + 9] = bytes.fromhex(tail)
-    return v1.Image(data, code=[(0, 256)], funcs=[(site, site + 9)])
+    return v1.Image(data, code=[(0, 256)], functions=[v1.Function(site, [(site, site + 9)])])
 
 a = call_image(16, 64, "4C 8B D1 48")
 b = call_image(32, 96, "4C 8B D7 48")
@@ -773,18 +846,12 @@ not infer a pipeline from an image.
 ## Generating and resolving patterns
 
 The generator takes an image plus code, rodata, and optional function ranges.
-The Python PE loader resolves x64 `UNW_FLAG_CHAININFO` parent records and merges
-contiguous chained coverage into the primary function's range. Fragments do not
-become separate entries: `func` maps their addresses to the parent, and `find`
-searches the extended range. Nested chains and padded unwind-code arrays are
-handled; invalid links, cycles, truncated chain records, and extensions over
-another primary function are not used to expand coverage.
-
-The current function API still holds one contiguous range per entry. Disconnected
-chained spans are omitted, not joined across gaps; representing those spans needs
-an entry-plus-spans API. This fixes contiguous chained tails without claiming
-complete hot/cold-split coverage. Unwind tables also need not enumerate every
-function, including leaf functions without unwind records.
+The Python PE loader resolves x64 `UNW_FLAG_CHAININFO` parent records, including
+nested chains, into a single primary entry and its associated coverage spans.
+Contiguous spans are merged; separated spans retain their gaps. Fragments never
+become function entries. Invalid links and cycles are not promoted to entries;
+conflicting ownership between resolved functions is rejected. Unwind tables need
+not enumerate every function, particularly leaf functions without unwind records.
 
 Ranges are image-relative and half-open. Supplied function ranges must already
 represent actual functions rather than unresolved chained unwind fragments.

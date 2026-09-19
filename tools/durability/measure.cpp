@@ -7,8 +7,8 @@
 // where there are no symbols (these DLLs export exactly one name). It is also
 // falsifiable, so ambiguity is COUNTED rather than assumed away.
 //
-// Targets come from .pdata, the x64 exception directory: a complete function
-// list needing no symbols.
+// Targets come from resolved .pdata entries in the x64 exception directory.
+// This needs no symbols but omits leaf functions without unwind records.
 #include "maml/generate.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -29,8 +29,9 @@ static std::string datadir() {
 struct Build {
     std::string tag;
     std::vector<uint8_t> bytes;
-    std::vector<generate::Range> code, rodata, funcs;
-    generate::Image view() const { return { bytes, code, rodata, funcs }; }
+    std::vector<generate::Range> code, rodata;
+    std::vector<generate::Function> functions;
+    generate::Image view() const { return { bytes, code, rodata, functions }; }
 };
 
 static Build load(const std::string& tag) {
@@ -48,11 +49,20 @@ static Build load(const std::string& tag) {
     uint64_t x = 0, y = 0;
     while (m >> kind) {
         if (kind == "size") { m >> x; continue; }
+        if (kind == "function") {
+            uint64_t entry;
+            if (!(m >> entry >> x >> y)) throw std::runtime_error("Invalid function span record");
+            auto it = std::find_if(b.functions.begin(), b.functions.end(), [&](const auto& fn) { return fn.entry == entry; });
+            if (it == b.functions.end()) b.functions.push_back({entry, {{x,y}}});
+            else it->spans.push_back({x,y});
+            continue;
+        }
         m >> x >> y;
         if (kind == "code") b.code.push_back({ x, y });
         else if (kind == "rodata") b.rodata.push_back({ x, y });
-        else if (kind == "func") b.funcs.push_back({ x, y });
+        else throw std::runtime_error("Unknown manifest record: " + kind);
     }
+    generate::validate_functions(b.view());
     return b;
 }
 
@@ -80,8 +90,8 @@ int main(int argc, char** argv) {
     Build A = load(ta), B = load(tb), C = load(tc), D = load(td);
     printf("generate+verify on %s + %s ; survival on %s and %s\n",
            A.tag.c_str(), B.tag.c_str(), C.tag.c_str(), D.tag.c_str());
-    printf("A: %.1fMB code=%zu rodata=%zu funcs=%zu\n\n",
-           A.bytes.size() / 1e6, A.code.size(), A.rodata.size(), A.funcs.size());
+    printf("A: %.1fMB code=%zu rodata=%zu functions=%zu\n\n",
+           A.bytes.size() / 1e6, A.code.size(), A.rodata.size(), A.functions.size());
 
     generate::Options o;
     o.want = want;
@@ -92,9 +102,9 @@ int main(int argc, char** argv) {
     size_t tgt_dual = 0, tgt_multi = 0, tgt_multi_surv = 0;
     size_t by_strategy[4] = { 0, 0, 0, 0 }, surv_strategy[4] = { 0, 0, 0, 0 };
 
-    const size_t step = std::max<size_t>(1, A.funcs.size() / sample);
-    for (size_t i = 0; i < A.funcs.size(); i += step) {
-        const uint64_t t = A.funcs[i].begin;
+    const size_t step = std::max<size_t>(1, A.functions.size() / sample);
+    for (size_t i = 0; i < A.functions.size(); i += step) {
+        const uint64_t t = A.functions[i].entry;
         ++targets;
         const auto cands = generate::candidates(A.view(), t, o);
         if (cands.empty())

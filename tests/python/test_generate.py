@@ -1,3 +1,4 @@
+from maml import Function
 import struct
 
 import pytest
@@ -143,7 +144,7 @@ def test_negative_anchor_delta_survives_the_round_trip():
     img = _core.Image.from_bytes(bytes(buf))
     img.code = [Range(begin=0, end=0x300)]
     img.rodata = [Range(begin=0x300, end=0x300 + len(s))]
-    img.funcs = [Range(begin=0x100, end=0x200)]
+    img.functions = [Function(0x100, [(0x100, 0x200)])]
 
     cs = _core.generate_candidates(img, target)
     string_anchors = [c for c in cs if c.strategy == _core.Strategy.StringAnchor]
@@ -259,18 +260,21 @@ def _build_pe_with_sections(tmp_path):
 
     binary = factory.get()
 
+    for index, section in enumerate(binary.sections):
+        section.pointerto_raw_data = 0x400 + 0x200 * index
+
     s_text = binary.sections[0]
     s_text.size = 512
     s_text.content = list(b"\x90" * 0x40) + [0] * (512 - 0x40)
 
     s_rdata = binary.sections[1]
     s_rdata.size = 512
-    s_rdata.content = list(b"\x41" * 0x20) + [0] * (512 - 0x20)
+    s_rdata.content = [1, 0, 0, 0] + [0] * (512 - 4)
 
     s_pdata = binary.sections[2]
     s_pdata.size = 512
-    inside = struct.pack("<III", 0x1008, 0x1028, 0)   # begin is inside .text
-    outside = struct.pack("<III", 0x5000, 0x5010, 0)  # begin is NOT inside .text
+    inside = struct.pack("<III", 0x1008, 0x1028, 0x2000)   # begin is inside .text
+    outside = struct.pack("<III", 0x5000, 0x5010, 0x2000)  # begin is NOT inside .text
     content = inside + outside
     s_pdata.content = list(content) + [0] * (512 - len(content))
 
@@ -297,18 +301,18 @@ def test_from_pe_fills_code_and_rodata(tmp_path):
         assert r.executable is False
 
 
-def test_from_pe_fills_funcs_from_pdata_filtered_to_text(tmp_path):
+def test_from_pe_fills_functions_from_pdata_filtered_to_text(tmp_path):
     pytest.importorskip("lief", reason="needs the maml[pe] extra")
     out = _build_pe_with_sections(tmp_path)
 
     img = _core.Image.from_pe(str(out))
 
-    assert len(img.funcs) == 1
-    assert img.funcs[0].begin == 0x1008
-    assert img.funcs[0].end == 0x1028
+    assert len(img.functions) == 1
+    assert img.functions[0].entry == 0x1008
+    assert img.functions[0].spans == ((0x1008, 0x1028),)
 
 
-def test_from_pe_leaves_funcs_empty_without_pdata(tmp_path):
+def test_from_pe_leaves_functions_empty_without_pdata(tmp_path):
     lief = pytest.importorskip("lief", reason="needs the maml[pe] extra")
 
     factory = lief.PE.Factory.create(lief.PE.PE_TYPE.PE32_PLUS)
@@ -331,19 +335,19 @@ def test_from_pe_leaves_funcs_empty_without_pdata(tmp_path):
     builder.write(str(out))
 
     img = _core.Image.from_pe(str(out))
-    assert img.funcs == []
+    assert img.functions == []
 
 
 # --- .pdata parsing, tested without building a PE -------------------------
 #
 # Both defects here were found by review rather than by mutation, because each
 # needs a specific binary shape to show and the test suite had no way to make
-# one. funcs_from_pdata is extracted for exactly that reason.
+# one. functions_from_pdata is extracted for exactly that reason.
 
 import struct
 
 from maml import Range
-from maml._containers import funcs_from_pdata
+from maml._containers import functions_from_pdata
 
 
 def _pdata(*records):
@@ -355,23 +359,23 @@ def test_pdata_drops_chained_fragments():
 
     generate.hpp states this as a precondition in bold. A hot/cold-split
     function has several .pdata records and only one is the entry; admitting
-    the fragments makes enclosing_func() report a fragment as the function.
+    the fragments makes enclosing_function() report a fragment as the function.
     """
     buf = bytearray(0x2000)
     buf[0x1000] = 0x01              # Version 1, Flags 0  -> a real entry
     buf[0x1010] = 0x01 | (0x4 << 3)  # Version 1, UNW_FLAG_CHAININFO -> fragment
     code = [Range(begin=0x100, end=0x900)]
 
-    got = funcs_from_pdata(_pdata((0x200, 0x300, 0x1000),
+    got = functions_from_pdata(_pdata((0x200, 0x300, 0x1000),
                                   (0x400, 0x500, 0x1010)), code, buf)
-    assert [f.begin for f in got] == [0x200]
+    assert [f.entry for f in got] == [0x200]
 
     # Positive control: with the chain flag cleared the same record IS a start,
     # so this test fails for the flag and not for some other filter.
     buf[0x1010] = 0x01
-    got = funcs_from_pdata(_pdata((0x200, 0x300, 0x1000),
+    got = functions_from_pdata(_pdata((0x200, 0x300, 0x1000),
                                   (0x400, 0x500, 0x1010)), code, buf)
-    assert [f.begin for f in got] == [0x200, 0x400]
+    assert [f.entry for f in got] == [0x200, 0x400]
 
 
 def test_pdata_filters_on_code_ranges_not_on_a_section_name():
@@ -386,10 +390,10 @@ def test_pdata_filters_on_code_ranges_not_on_a_section_name():
     # Two executable ranges, neither of which has to be called .text.
     code = [Range(begin=0x100, end=0x200), Range(begin=0x800, end=0x900)]
 
-    got = funcs_from_pdata(_pdata((0x150, 0x160, 0x1000),   # in the first
+    got = functions_from_pdata(_pdata((0x150, 0x160, 0x1000),   # in the first
                                   (0x850, 0x860, 0x1000),   # in the SECOND
                                   (0xDEAD0, 0xDEAE0, 0x1000)), code, buf)
-    assert [f.begin for f in got] == [0x150, 0x850]
+    assert [f.entry for f in got] == [0x150, 0x850]
 
 
 def test_pdata_ignores_a_trailing_partial_record():
@@ -397,15 +401,15 @@ def test_pdata_ignores_a_trailing_partial_record():
     buf[0x1000] = 0x01
     code = [Range(begin=0x100, end=0x900)]
     raw = _pdata((0x200, 0x300, 0x1000)) + b"\x01\x02\x03\x04"   # 4 spare bytes
-    got = funcs_from_pdata(raw, code, buf)
-    assert [f.begin for f in got] == [0x200]
+    got = functions_from_pdata(raw, code, buf)
+    assert [f.entry for f in got] == [0x200]
 
 
 def test_pdata_rejects_an_end_before_its_begin_or_past_the_image():
     buf = bytearray(0x2000)
     buf[0x1000] = 0x01
     code = [Range(begin=0x100, end=0x900)]
-    got = funcs_from_pdata(_pdata((0x300, 0x200, 0x1000),      # end < begin
+    got = functions_from_pdata(_pdata((0x300, 0x200, 0x1000),      # end < begin
                                   (0x400, 0x99999, 0x1000),    # end past image
                                   (0x500, 0x600, 0x1000)), code, buf)
-    assert [f.begin for f in got] == [0x500]
+    assert [f.entry for f in got] == [0x500]

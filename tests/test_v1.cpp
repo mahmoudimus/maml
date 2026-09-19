@@ -75,7 +75,7 @@ TEST_CASE("v1 generator emits and verifies nibble masks", "[v1][generate]") {
     std::copy(calla.begin(), calla.end(), a.begin() + 64);
     std::copy(callb.begin(), callb.end(), b.begin() + 96);
     const std::array<maml::generate::Range, 1> code{ { { 0, 128 } } };
-    const std::array<maml::generate::Range, 1> fa{ { { 64, 73 } } }, fb{ { { 96, 105 } } };
+    const std::array<maml::generate::Function, 1> fa{ { { 64, {{64, 73}} } } }, fb{ { { 96, {{96, 105}} } } };
     maml::v1::generate::Options options;
     options.prefer_short = false;
     const auto candidates = maml::v1::generate::verified({ a, code, {}, fa }, 32, { b, code, {}, fb }, 48, options);
@@ -92,14 +92,14 @@ TEST_CASE("v1 generator emits and verifies nibble masks", "[v1][generate]") {
 TEST_CASE("v1 strict function mapping checks each input", "[v1][pipeline]") {
     const std::array<uint8_t, 3> bytes{ 0xAA, 0xAA, 0xBB };
     const maml::v1::Image image{ bytes, 0x1000 };
-    const std::array<maml::generate::Range, 1> funcs{ { { 0, 2 } } };
-    auto loose = maml::v1::Pipeline("bytes(\"AA\") -> func:loose").run(image, {}, {}, funcs);
+    const std::array<maml::generate::Function, 1> functions{ { { 0, {{0, 2}} } } };
+    auto loose = maml::v1::Pipeline("bytes(\"AA\") -> func:loose").run(image, {}, {}, functions);
     REQUIRE(loose.values.size() == 1);
     REQUIRE(loose.values[0].value == 0x1000);
     REQUIRE(loose.trace.back().stage == "func:loose");
-    REQUIRE_THROWS_AS(maml::v1::Pipeline("bytes(\"AA\") -> func:strict").run(image, {}, {}, funcs), maml::v1::Error);
-    REQUIRE_THROWS_AS(maml::v1::Pipeline("bytes(\"BB\") -> func:strict").run(image, {}, {}, funcs), maml::v1::Error);
-    auto strict = maml::v1::Pipeline("bytes(\"AA AA\") -> func:strict").run(image, {}, {}, funcs);
+    REQUIRE_THROWS_AS(maml::v1::Pipeline("bytes(\"AA\") -> func:strict").run(image, {}, {}, functions), maml::v1::Error);
+    REQUIRE_THROWS_AS(maml::v1::Pipeline("bytes(\"BB\") -> func:strict").run(image, {}, {}, functions), maml::v1::Error);
+    auto strict = maml::v1::Pipeline("bytes(\"AA AA\") -> func:strict").run(image, {}, {}, functions);
     REQUIRE(strict.values[0].value == 0x1000);
     REQUIRE(strict.trace.back().stage == "func:strict");
     REQUIRE_THROWS_AS(maml::v1::Pipeline("bytes(\"AA\") -> func:strict:loose"), maml::v1::Error);
@@ -109,12 +109,12 @@ TEST_CASE("v1 pipeline builder shares parsing and preserves prefixes", "[v1][pip
     using namespace maml::v1;
     const std::array<uint8_t, 7> data{ 0xE8, 1, 0, 0, 0, 0x90, 0xCC };
     const Image image{ data };
-    const std::array<maml::generate::Range, 2> funcs{ { { 0, 6 }, { 6, 7 } } };
+    const std::array<maml::generate::Function, 2> functions{ { { 0, {{0, 6}} }, { 6, {{6, 7}} } } };
     const auto prefix = PipelineBuilder().bytes("E8 rel32(target):follow CC");
     const auto query = prefix.capture("target").func(FunctionMode::Strict).unique();
     REQUIRE(prefix.source() == "bytes(\"E8 rel32(target):follow CC\")");
-    const auto result = query.build().run(image, {}, {}, funcs);
-    const auto text = Pipeline("bytes(\"E8 rel32(target):follow CC\")\n -> capture(\"target\")\n -> func:strict\n -> unique").run(image, {}, {}, funcs);
+    const auto result = query.build().run(image, {}, {}, functions);
+    const auto text = Pipeline("bytes(\"E8 rel32(target):follow CC\")\n -> capture(\"target\")\n -> func:strict\n -> unique").run(image, {}, {}, functions);
     REQUIRE(result.values.size() == 1);
     REQUIRE(result.values[0].value == text.values[0].value);
     REQUIRE(result.values[0].value == 6);
@@ -165,4 +165,27 @@ TEST_CASE("v1 string contains returns indexed string starts", "[v1][pipeline]") 
     REQUIRE_THROWS_AS(PipelineBuilder().str("Needle", static_cast<StringMatch>(99)).build(), Error);
     REQUIRE_FALSE(PipelineBuilder().str("").build().run(image, {}, rodata).ok());
     REQUIRE_THROWS_AS(PipelineBuilder().str("", StringMatch::Contains).build(), Error);
+}
+
+TEST_CASE("function spans preserve entries and exclude gaps", "[v1][pipeline]") {
+    using namespace maml;
+    std::array<uint8_t, 32> bytes{};
+    bytes[0] = 0xAA;
+    bytes[12] = bytes[24] = 0xBB;
+    const std::array<generate::Function, 2> functions{ { { 0, { { 0, 4 }, { 24, 28 } } }, { 8, { { 8, 16 } } } } };
+    v1::Image image{ bytes };
+    auto result = v1::Pipeline("bytes(\"BB\") -> func").run(image, {}, {}, functions);
+    REQUIRE(result.values.size() == 2);
+    REQUIRE(result.values[0].value == 0);
+    REQUIRE(result.values[1].value == 8);
+    result = v1::Pipeline("bytes(\"AA\") -> find(\"BB\")").run(image, {}, {}, functions);
+    REQUIRE(result.matches.size() == 1);
+    REQUIRE(result.matches[0].offset == 24);
+    REQUIRE_THROWS_AS(v1::Pipeline("bytes(\"BB\") -> func:strict").run(image, {}, {}, functions), v1::Error);
+    generate::Image indexed{ bytes, {}, {}, functions };
+    REQUIRE(generate::clamp_to_func(indexed, 25, 64) == 3);
+    REQUIRE(generate::enclosing_function(indexed, 25)->entry == 0);
+    REQUIRE_FALSE(generate::enclosing_function(indexed, 20));
+    const std::array<generate::Function, 2> invalid{ { { 0, { { 0, 4 } } }, { 2, { { 2, 8 } } } } };
+    REQUIRE_THROWS_AS(v1::Pipeline("bytes(\"AA\") -> func").run(image, {}, {}, invalid), v1::Error);
 }

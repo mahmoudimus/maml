@@ -1,3 +1,4 @@
+from maml import Function
 """Semantic frontend acceptance tests; the JSON fixtures supply independent answers."""
 import importlib
 import json
@@ -22,7 +23,7 @@ def test_relative_capture_and_follow():
 
 def test_pipeline_records_projection_and_prevalidation():
     v1 = api()
-    image = v1.Image(bytes.fromhex('E8 05 00 00 00 E8 00 00 00 00 CC'), funcs=[(0, 11)])
+    image = v1.Image(bytes.fromhex('E8 05 00 00 00 E8 00 00 00 00 CC'), functions=[Function(0, [(0, 11)])])
     matches = v1.Pipeline('bytes("E8 rel32(callee)")').run(image)
     assert len(matches.matches) == 2
     result = v1.Pipeline('bytes("E8 rel32(callee)") -> capture("callee") -> unique').run(image)
@@ -39,7 +40,7 @@ def test_pipeline_string_xref_func_find():
     data[:12] = bytes.fromhex('48 8D 05 19 00 00 00 E8 04 00 00 00')
     data[16] = 0xCC
     data[32:40] = b'Example\0'
-    image = v1.Image(data, code=[(0, 24)], rodata=[(32, 40)], funcs=[(0, 12),(16,24)])
+    image = v1.Image(data, code=[(0, 24)], rodata=[(32, 40)], functions=[Function(0, [(0, 12)]), Function(16, [(16, 24)])])
     result = v1.Pipeline('str("Example") -> xrefs -> func -> find("E8 rel32(init)") -> capture("init") -> unique').run(image)
     assert result.values[0].value == 16
 
@@ -96,7 +97,7 @@ def test_empty_input_still_validates_pipeline_schema():
 
 def test_pipeline_selection_read_and_callers_with_base():
     v1=api()
-    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),base=0x1000,code=[(0,7)],funcs=[(0,6),(6,7)])
+    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),base=0x1000,code=[(0,7)],functions=[Function(0, [(0, 6)]), Function(6, [(6, 7)])])
     result=v1.Pipeline('bytes("CC") -> func -> callers -> nth(0) -> read(1) -> unique').run(image)
     assert result.values[0].value==0xE8
     assert v1.Pipeline('bytes("??") -> limit(2)').run(image).matches[-1].offset==1
@@ -105,7 +106,7 @@ def test_pipeline_selection_read_and_callers_with_base():
 
 def test_scope_find_can_explicitly_follow_outside_function():
     v1=api()
-    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),funcs=[(0,5)])
+    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),functions=[Function(0, [(0, 5)])])
     result=v1.Pipeline('bytes("E8") -> func -> find("E8 rel32(x):follow CC") -> unique').run(image)
     assert result.matches[0].capture('x').value==6
 
@@ -157,7 +158,7 @@ def test_native_cli_dialect_selection(tmp_path):
             pytest.skip(f'Build {name} to run native CLI integration')
         return str(found)
     image=tmp_path/'image.bin'; image.write_bytes(bytes.fromhex('E8 01 00 00 00 90 CC'))
-    ranges=tmp_path/'ranges.txt'; ranges.write_text('size 7\ncode 0 7\nfunc 0 7\n')
+    ranges=tmp_path/'ranges.txt'; ranges.write_text('size 7\ncode 0 7\nfunction 0 0 7\n')
     scan=subprocess.run([exe('mamlscan'),str(image),'E8 rel32(x):follow CC','--capture','x'],capture_output=True,text=True)
     assert scan.returncode==0,scan.stderr+scan.stdout
     assert '6' in scan.stdout

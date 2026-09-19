@@ -187,7 +187,8 @@ namespace maml::v1 {
             }
         }
         PipelineResult run(const Image& image, std::span<const maml::generate::Range> code = {},
-            std::span<const maml::generate::Range> rodata = {}, std::span<const maml::generate::Range> funcs = {},
+            std::span<const maml::generate::Range> rodata = {},
+            std::span<const maml::generate::Function> functions = {},
             std::span<const maml::generate::Range> instructions = {}) const {
             std::map<uint64_t, uint64_t> instruction_ends;
             for (auto ins : instructions) {
@@ -197,7 +198,8 @@ namespace maml::v1 {
                 if (!inserted && it->second != ins.end)
                     throw Error("InvalidArgument", "Conflicting instruction lengths");
             }
-            maml::generate::Image indexed{ image.bytes, code, rodata, funcs };
+            maml::generate::Image indexed{ image.bytes, code, rodata, functions };
+            maml::generate::validate_functions(indexed);
             PipelineResult r;
             auto count = [&] {
                 return r.is_matches ? r.matches.size() : r.values.size();
@@ -305,37 +307,34 @@ namespace maml::v1 {
                         r.is_matches = true;
                         r.schema = s.pattern->schema();
                     } else if (s.name == "find") {
-                        if (funcs.empty())
-                            throw Error("MissingMetadata", "find requires function ranges");
+                        if (functions.empty())
+                            throw Error("MissingMetadata", "find requires function metadata");
                         std::set<std::pair<uint64_t, uint64_t>> scopes;
                         for (auto at : inputs)
-                            if (auto f = maml::generate::enclosing_func(indexed, at))
-                                scopes.insert({ f->begin, f->end });
-                        std::set<uint64_t> visited;
+                            if (auto f = maml::generate::enclosing_function(indexed, at))
+                                for (auto span : f->spans)
+                                    scopes.insert({ span.begin, span.end });
                         for (auto [lo, hi] : scopes)
                             for (uint64_t at = lo; at < std::min<uint64_t>(hi, image.bytes.size()); ++at)
-                                if (visited.insert(at).second)
-                                    if (auto m = s.pattern->match_at(image, at))
-                                        r.matches.push_back(std::move(*m));
+                                if (auto m = s.pattern->match_at(image, at))
+                                    r.matches.push_back(std::move(*m));
                         std::sort(r.matches.begin(), r.matches.end(), [](const Match& a, const Match& b) {
                             return a.offset < b.offset;
                         });
                         r.is_matches = true;
                         r.schema = s.pattern->schema();
                     } else if (s.name == "func") {
-                        if (funcs.empty())
-                            throw Error("MissingMetadata", "func requires function ranges");
+                        if (functions.empty())
+                            throw Error("MissingMetadata", "func requires function metadata");
                         for (auto at : inputs) {
                             if (s.modifier == "strict") {
-                                const bool entry = std::any_of(funcs.begin(), funcs.end(), [&](const auto& f) {
-                                    return f.begin == at && f.end > at;
-                                });
+                                const bool entry = std::any_of(functions.begin(), functions.end(), [&](const auto& f) { return f.entry == at; });
                                 if (!entry)
                                     throw Error("NotFunctionEntry",
                                         "func:strict requires every input to be a known function entry; rejected offset " + std::to_string(at));
                                 r.values.push_back(address(at));
-                            } else if (auto f = maml::generate::enclosing_func(indexed, at)) {
-                                r.values.push_back(address(f->begin));
+                            } else if (auto f = maml::generate::enclosing_function(indexed, at)) {
+                                r.values.push_back(address(f->entry));
                             }
                         }
                     } else if (s.name == "callers" || s.name == "xrefs") {

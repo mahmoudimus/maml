@@ -78,6 +78,13 @@ def main(argv=None) -> int:
         return fail("semantic pipeline did not resolve its named capture")
     print("  pipeline:     named capture and pipeline passed")
 
+    split = maml.Image(bytes.fromhex("AA 90 90 BB"),
+                       functions=[maml.Function(0, [(0, 1), (3, 4)])])
+    found = maml.Pipeline('bytes("BB") -> func -> find("AA") -> unique').run(split)
+    if found.matches[0].offset != 0:
+        return fail("split-function ownership did not survive the installed binding")
+    print("  functions:    noncontiguous coverage passed")
+
     print("wheel OK")
     return 0
 

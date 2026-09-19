@@ -1,3 +1,4 @@
+from maml import Function
 import pytest
 from maml import v1
 
@@ -8,7 +9,7 @@ def builder():
 
 
 def test_builder_matches_multiline_text_with_capture_and_strict_func():
-    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),funcs=[(0,6),(6,7)])
+    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),functions=[Function(0, [(0, 6)]), Function(6, [(6, 7)])])
     text='''bytes("E8 rel32(target):follow CC")
         -> capture("target")
         -> func:strict
@@ -44,12 +45,12 @@ def test_builder_quotes_arguments_without_injecting_stages():
 
 
 def test_builder_all_transforms_and_loose_mode():
-    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),code=[(0,7)],funcs=[(0,6),(6,7)])
+    image=v1.Image(bytes.fromhex('E8 01 00 00 00 90 CC'),code=[(0,7)],functions=[Function(0, [(0, 6)]), Function(6, [(6, 7)])])
     for step in ('xrefs','callers'):
         prefix=builder().bytes('CC').func(strict=False)
         query=getattr(prefix,step)().nth(0).read(1).unique()
         assert query.build().run(image).values[0].value==0xE8
-    image=v1.Image(bytes.fromhex('AA BB'),funcs=[(0,2)])
+    image=v1.Image(bytes.fromhex('AA BB'),functions=[Function(0, [(0, 2)])])
     query=builder().bytes('AA').func().find('BB').unique()
     assert query.build().run(image).matches[0].offset==1
 

@@ -22,3 +22,8 @@ The resolve and pipeline harnesses currently use fixed fixture identifiers
 `69404`, `69382`, and `69497deob`, plus `map.txt`. They are fixture-driven
 measurement tools, not general-purpose binary loaders. On Windows the
 executable filenames have the additional `.exe` suffix.
+
+The Python flattener requires the installed MAML package with its PE extra. It
+uses the shared PE loader and writes `function ENTRY BEGIN END` span records.
+Measurement and resolution sample function entries once, including entries with
+multiple spans. Fragments never become independent sample targets.

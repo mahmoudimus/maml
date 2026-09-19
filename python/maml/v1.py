@@ -3,6 +3,7 @@
 Importing this module selects the ``maml-v1`` dialect. No syntax guessing occurs.
 All pattern/pipeline parsing and binary execution run in the C++ frontend.
 """
+from ._containers import Function, validate_functions
 from dataclasses import dataclass
 from types import MappingProxyType
 from maml._core import NativePattern, NativePipeline
@@ -99,7 +100,7 @@ def _matches(raw, schema):
 
 class Image:
     """Immutable byte snapshot with logical base, explicit pointer map, and RVA ranges."""
-    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), funcs=(), instructions=()):
+    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), functions=(), instructions=()):
         self.data = bytes(data)
         self.base = _u64(base)
         self.pointer_map = {_u64(k):_u64(v) for k,v in (pointer_map or {}).items()}
@@ -112,8 +113,9 @@ class Image:
                     raise ValueError('Ranges must be half-open offsets within the image')
                 result.append((begin,end))
             return tuple(result)
-        self.code, self.rodata, self.funcs = ranges(code), ranges(rodata), ranges(funcs)
+        self.code, self.rodata = ranges(code), ranges(rodata)
         self.instructions = ranges(instructions)
+        self.functions = validate_functions(functions, len(self.data))
 
     @classmethod
     def from_file(cls, path, **kwargs):
@@ -123,8 +125,8 @@ class Image:
     @classmethod
     def from_pe(cls, path, **kwargs):
         from ._containers import flatten_pe
-        data, sections, code, rodata, funcs = flatten_pe(path)
-        return cls(data, code=code, rodata=rodata, funcs=funcs, **kwargs)
+        data, sections, code, rodata, functions = flatten_pe(path)
+        return cls(data, code=code, rodata=rodata, functions=functions, **kwargs)
 
 
 class Pattern:
@@ -181,7 +183,7 @@ class Pipeline:
     def run(self, image):
         is_matches,schema,raw,values,trace = _native(
             self._native.run, image.data, image.base, image.pointer_map,
-            image.code, image.rodata, image.funcs, image.instructions)
+            image.code, image.rodata, image.functions, image.instructions)
         return PipelineResult('matches' if is_matches else 'values',schema,
                               tuple(_matches(raw,schema)),tuple(CaptureValue(*v) for v in values),
                               tuple(StageResult(*t) for t in trace))

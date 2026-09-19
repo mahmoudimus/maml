@@ -36,8 +36,9 @@ def _image(image):
     if image.base != 0:
         raise ValueError('Generation uses buffer-relative targets; image.base must be zero')
     result = _Image.from_bytes(image.data)
-    for field in ('code','rodata','funcs'):
+    for field in ('code','rodata'):
         setattr(result,field,[Range(begin,end) for begin,end in getattr(image,field)])
+    result.functions = list(image.functions)
     return result
 
 

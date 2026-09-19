@@ -1,3 +1,4 @@
+from maml import Function
 import pytest
 from maml import v1
 
@@ -30,7 +31,7 @@ def make(callee,site,tail):
     data[callee:callee+8]=bytes.fromhex('48 89 E5 55 41 53 90 C3')
     data[site:site+5]=b'\xE8'+(callee-site-5).to_bytes(4,'little',signed=True)
     data[site+5:site+5+len(tail)]=tail
-    return v1.Image(data,code=[(0,256)],funcs=[(callee,callee+8),(site,site+5+len(tail))])
+    return v1.Image(data,code=[(0,256)],functions=[Function(callee, [(callee, callee+8)]), Function(site, [(site, site+5+len(tail))])])
 
 
 def test_generated_references_have_dialect_and_named_target():
@@ -63,7 +64,7 @@ def test_verification_does_not_accept_ambiguous_masked_pattern():
     b=make(32,96,bytes.fromhex('4C 8B D7 48'))
     data=bytearray(b.data)
     data[160:169]=b'\xE8'+(32-165).to_bytes(4,'little',signed=True)+bytes.fromhex('4C 8B D3 48')
-    b=v1.Image(data,code=[(0,256)],funcs=b.funcs+((160,169),))
+    b=v1.Image(data,code=[(0,256)],functions=b.functions + (Function(160, [(160, 169)]),))
     cs=g.verified(a,16,b,32,g.Options(nibble_wildcards=True,prefer_short=False))
     assert not any('D?' in c.pattern for c in cs)
 
@@ -82,14 +83,14 @@ def test_rip_immediate_adjustment_and_string_anchor():
     data=bytearray(b'\xCC'*1024)
     site,target=0x100,0x300
     data[site:site+11]=bytes.fromhex('48 C7 05')+(target-site-11).to_bytes(4,'little')+bytes.fromhex('01 00 00 00')
-    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x310)],funcs=[(0x100,0x200)])
+    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x310)],functions=[Function(0x100, [(0x100, 0x200)])])
     ref=next(c for c in g.candidates(image,target) if c.strategy.name=='RipRef')
     assert 'rel32(target, target_add=4)' in ref.pattern
     assert g.resolve_consensus(image,[ref])[0].address==target
     data=bytearray(b'\xCC'*1024)
     data[0x300:0x30D]=b'UNIQUESTRING\0'
     data[0x110:0x117]=bytes.fromhex('48 8D 05')+(0x300-0x117).to_bytes(4,'little')
-    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x30D)],funcs=[(0x100,0x200)])
+    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x30D)],functions=[Function(0x100, [(0x100, 0x200)])])
     anchor=next(c for c in g.candidates(image,0x180) if c.strategy.name=='StringAnchor')
     assert '?? ?? ?? ??' in anchor.pattern
     assert anchor.anchor_delta==-112 and anchor.target_capture==''
@@ -112,7 +113,7 @@ def test_one_anchor_cannot_fill_verified_budget_with_mask_variants():
     b=make(32,96,bytes.fromhex('4C 8B D7 48'))
     data=bytearray(b.data)
     data[160:169]=b'\xE8'+(32-165).to_bytes(4,'little',signed=True)+bytes.fromhex('4C 89 D1 48')
-    b=v1.Image(data,code=[(0,256)],funcs=b.funcs+((160,169),))
+    b=v1.Image(data,code=[(0,256)],functions=b.functions + (Function(160, [(160, 169)]),))
     cs=g.verified(a,16,b,32,g.Options(prefer_short=False))
     origins=[(c.strategy,c.anchor_site) for c in cs]
     assert len(origins)==len(set(origins))
@@ -124,7 +125,7 @@ def test_string_anchor_call_capture_uses_semantic_reference():
     data[0x300:0x30D]=b'UNIQUESTRING\0'
     data[0x100:0x107]=bytes.fromhex('48 8D 05')+(0x300-0x107).to_bytes(4,'little')
     data[0x110:0x115]=b'\xE8'+(0x200-0x115).to_bytes(4,'little')
-    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x30D)],funcs=[(0x100,0x120),(0x200,0x210)])
+    image=v1.Image(data,code=[(0,0x300)],rodata=[(0x300,0x30D)],functions=[Function(0x100, [(0x100, 0x120)]), Function(0x200, [(0x200, 0x210)])])
     anchors=[c for c in g.candidates(image,0x200,g.Options(want=16)) if c.strategy.name=='StringAnchor' and c.target_capture]
     assert anchors
     assert all('rel32(target)' in c.pattern and '?? ?? ?? ??' in c.pattern for c in anchors)

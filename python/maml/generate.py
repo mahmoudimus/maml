@@ -5,7 +5,7 @@ again in a later, independent compilation. This is a thin re-export of the
 Cython/C++ glue in `maml._core` (which is where the buffer pinning and
 the C++ struct marshalling actually happen) under its own submodule, kept
 separate from the top-level `maml` namespace: `maml.Range` and
-`maml.Image` are reused as-is (Image gained `code`, `rodata` and `funcs`
+`maml.Image` are reused as-is (Image gained `code`, `rodata` and `functions`
 attributes for this), everything else generation-specific lives here.
 
     from maml import generate

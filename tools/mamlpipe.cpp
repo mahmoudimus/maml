@@ -14,7 +14,7 @@
 //     size N
 //     code A B
 //     rodata A B
-//     func A B
+//     function ENTRY A B
 // Addresses are RVAs into a flat image (offset 0 in the file is RVA 0), not a
 // PE on disk.
 //
@@ -49,7 +49,8 @@ namespace {
     struct Manifest {
         bool ok = false;
         uint64_t size = 0; // 0 = the manifest did not say
-        std::vector<generate::Range> code, rodata, funcs, instructions;
+        std::vector<generate::Range> code, rodata, instructions;
+        std::vector<generate::Function> functions;
         std::string error;
     };
 
@@ -70,8 +71,8 @@ namespace {
             if (line.empty() || line[0] == '#')
                 continue;
             char kind[32] = { 0 };
-            unsigned long long a = 0, b = 0;
-            const int got = sscanf(line.c_str(), "%31s %llu %llu", kind, &a, &b);
+            unsigned long long a = 0, b = 0, c = 0;
+            const int got = sscanf(line.c_str(), "%31s %llu %llu %llu", kind, &a, &b, &c);
             const std::string k(kind);
             if (got == 2 && k == "size") {
                 m.size = a;
@@ -81,11 +82,38 @@ namespace {
                 m.rodata.push_back({ a, b });
             } else if (got == 3 && k == "instruction") {
                 m.instructions.push_back({ a, b });
-            } else if (got == 3 && k == "func") {
-                m.funcs.push_back({ a, b });
+            } else if (got == 4 && k == "function") {
+                auto it = std::find_if(m.functions.begin(), m.functions.end(), [&](const auto& f) {
+                    return f.entry == a;
+                });
+                if (it == m.functions.end())
+                    m.functions.push_back({ a, { { b, c } } });
+                else
+                    it->spans.push_back({ b, c });
+
             } else {
                 m.error = path + ":" + std::to_string(lineno) + ": unrecognised line";
                 return m;
+            }
+        }
+        if (!m.functions.empty()) {
+            for (auto& f : m.functions) {
+                for (auto r : f.spans)
+                    if (r.begin >= r.end) {
+                        m.error = path + ": empty or reversed function span";
+                        return m;
+                    }
+                std::sort(f.spans.begin(), f.spans.end(), [](auto a, auto b) {
+                    return a.begin < b.begin;
+                });
+                std::vector<generate::Range> merged;
+                for (auto r : f.spans) {
+                    if (!merged.empty() && r.begin <= merged.back().end)
+                        merged.back().end = std::max(merged.back().end, r.end);
+                    else
+                        merged.push_back(r);
+                }
+                f.spans = std::move(merged);
             }
         }
         m.ok = true;
@@ -97,7 +125,7 @@ namespace {
         img.bytes = std::span<const uint8_t>(bytes.data(), bytes.size());
         img.code = m.code;
         img.rodata = m.rodata;
-        img.funcs = m.funcs;
+        img.functions = m.functions;
         return img;
     }
 
@@ -110,7 +138,7 @@ namespace {
             "        | before(\"pattern\", within=N) | after(\"pattern\", within=N)\n"
             "        | capture(\"name\") | xrefs | callers | func | func:strict | func:loose\n"
             "        | unique | nth(N) | limit(N) | read(N),  composed with ->\n"
-            "manifest lines: size N | code A B | rodata A B | func A B | instruction A B\n");
+            "manifest lines: size N | code A B | rodata A B | instruction A B | function ENTRY A B\n");
     }
 
 } // namespace
@@ -184,7 +212,7 @@ int main(int argc, char** argv) {
 
     auto execute = [&](const std::string& text, const std::string& name) {
         try {
-            const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.funcs, m.instructions);
+            const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.functions, m.instructions);
             if (!name.empty())
                 printf("%s\t", name.c_str());
             printf("%s %s=%zu", result.ok() ? "OK" : "NONE", result.is_matches ? "matches" : "values",

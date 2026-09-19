@@ -1,3 +1,4 @@
+from maml import Function
 """Every field of every bound C++ struct reaches Python, and carries a value.
 
 WHY THIS FILE EXISTS, and why it is not more behaviour tests.
@@ -131,7 +132,7 @@ def img():
     """An image with a function body, so a pipeline exercises every field."""
     b = bytearray(0x800)
     b[0x100:0x108] = bytes([0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56])
-    return v1.Image(bytes(b), code=[(0, 0x800)], funcs=[(0x100, 0x200)])
+    return v1.Image(bytes(b), code=[(0, 0x800)], functions=[Function(0x100, [(0x100, 0x200)])])
 
 def test_every_stageresult_field_is_populated(img):
     """Each field observed holding a non-default value at least once."""
@@ -196,7 +197,7 @@ def gen_img():
     i = _core.Image.from_bytes(bytes(buf))
     i.code = [Range(0, 0x300)]
     i.rodata = [Range(0x300, 0x300 + len(text))]
-    i.funcs = [Range(0x100, 0x200)]
+    i.functions = [Function(0x100, [(0x100, 0x200)])]
     return i
 
 

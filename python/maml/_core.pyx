@@ -89,7 +89,7 @@ cdef class Image:
         self.sections = []
         self.code = []
         self.rodata = []
-        self.funcs = []
+        self.functions = []
 
     def __init__(self, *args, **kwargs):
         raise TypeError(
@@ -127,16 +127,16 @@ cdef class Image:
         """Flatten a PE's sections to their virtual addresses. Needs maml[pe].
 
         Also fills `code` and `rodata` from section characteristics (executable
-        -> code; initialised, non-executable data -> rodata) and `funcs` from
+        -> code; initialised, non-executable data -> rodata) and `functions` from
         `.pdata` when present -- see _containers.flatten_pe.
         """
         from maml._containers import flatten_pe
-        data, ranges, code, rodata, funcs = flatten_pe(path)
+        data, ranges, code, rodata, functions = flatten_pe(path)
         img = Image.from_bytes(data)
         img.sections = ranges
         img.code = code
         img.rodata = rodata
-        img.funcs = funcs
+        img.functions = functions
         return img
 
     def to_va(self, rva):
@@ -241,6 +241,12 @@ cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
         uint64_t end
 
 
+cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
+    cdef cppclass GenFunction_t "maml::generate::Function":
+        GenFunction_t()
+        uint64_t entry
+        vector[GenRange_t] spans
+
 # std::span<const Range>, the same reason ByteSpan exists in _core.pxd:
 # Cython cannot spell a const template argument, so the C++ type is given
 # verbatim as the name.
@@ -248,6 +254,9 @@ cdef extern from "<span>" namespace "std" nogil:
     cdef cppclass RangeSpan "std::span<const maml::generate::Range>":
         RangeSpan()
         RangeSpan(const GenRange_t*, size_t)
+    cdef cppclass FunctionSpan "std::span<const maml::generate::Function>":
+        FunctionSpan()
+        FunctionSpan(const GenFunction_t*, size_t)
 
 
 cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
@@ -256,7 +265,7 @@ cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
         ByteSpan bytes
         RangeSpan code
         RangeSpan rodata
-        RangeSpan funcs
+        FunctionSpan functions
 
     cdef cppclass GenOptions_t "maml::generate::Options":
         GenOptions_t()
@@ -410,13 +419,27 @@ cdef vector[GenRange_t] _ranges_to_vec(list ranges):
     return out
 
 
+cdef vector[GenFunction_t] _functions_to_vec(object functions):
+    cdef vector[GenFunction_t] out
+    cdef GenFunction_t f
+    cdef GenRange_t r
+    for item in functions:
+        f.entry = item.entry
+        f.spans.clear()
+        for lo, hi in item.spans:
+            r.begin, r.end = lo, hi
+            f.spans.push_back(r)
+        out.push_back(f)
+    return out
+
+
 cdef GenImage_t _to_gen_image(Image image, vector[GenRange_t]& code_v,
-                               vector[GenRange_t]& rodata_v, vector[GenRange_t]& funcs_v):
+                               vector[GenRange_t]& rodata_v, vector[GenFunction_t]& functions_v):
     cdef GenImage_t g
     g.bytes = ByteSpan(image._data(), image.size)
     g.code = RangeSpan(code_v.data(), code_v.size())
     g.rodata = RangeSpan(rodata_v.data(), rodata_v.size())
-    g.funcs = RangeSpan(funcs_v.data(), funcs_v.size())
+    g.functions = FunctionSpan(functions_v.data(), functions_v.size())
     return g
 
 
@@ -463,8 +486,8 @@ def generate_candidates(Image image not None, unsigned long long target, opt=Non
     cdef GenOptions_t gopt = _to_gen_options(opt)
     cdef vector[GenRange_t] code_v = _ranges_to_vec(image.code)
     cdef vector[GenRange_t] rodata_v = _ranges_to_vec(image.rodata)
-    cdef vector[GenRange_t] funcs_v = _ranges_to_vec(image.funcs)
-    cdef GenImage_t gimg = _to_gen_image(image, code_v, rodata_v, funcs_v)
+    cdef vector[GenFunction_t] functions_v = _functions_to_vec(image.functions)
+    cdef GenImage_t gimg = _to_gen_image(image, code_v, rodata_v, functions_v)
     cdef vector[GenCandidate_t] out
     cdef uint64_t t = <uint64_t>target
     with nogil:
@@ -486,12 +509,12 @@ def generate_verified(Image image_a not None, unsigned long long target_a,
     cdef GenOptions_t gopt = _to_gen_options(opt)
     cdef vector[GenRange_t] a_code = _ranges_to_vec(image_a.code)
     cdef vector[GenRange_t] a_rodata = _ranges_to_vec(image_a.rodata)
-    cdef vector[GenRange_t] a_funcs = _ranges_to_vec(image_a.funcs)
     cdef vector[GenRange_t] b_code = _ranges_to_vec(image_b.code)
     cdef vector[GenRange_t] b_rodata = _ranges_to_vec(image_b.rodata)
-    cdef vector[GenRange_t] b_funcs = _ranges_to_vec(image_b.funcs)
-    cdef GenImage_t ga = _to_gen_image(image_a, a_code, a_rodata, a_funcs)
-    cdef GenImage_t gb = _to_gen_image(image_b, b_code, b_rodata, b_funcs)
+    cdef vector[GenFunction_t] a_functions = _functions_to_vec(image_a.functions)
+    cdef vector[GenFunction_t] b_functions = _functions_to_vec(image_b.functions)
+    cdef GenImage_t ga = _to_gen_image(image_a, a_code, a_rodata, a_functions)
+    cdef GenImage_t gb = _to_gen_image(image_b, b_code, b_rodata, b_functions)
     cdef vector[GenCandidate_t] out
     cdef uint64_t ta = <uint64_t>target_a
     cdef uint64_t tb = <uint64_t>target_b

@@ -28,8 +28,9 @@ static std::string datadir() {
 
 struct Build {
     std::vector<uint8_t> bytes;
-    std::vector<generate::Range> code, rodata, funcs;
-    generate::Image view() const { return { bytes, code, rodata, funcs }; }
+    std::vector<generate::Range> code, rodata;
+    std::vector<generate::Function> functions;
+    generate::Image view() const { return { bytes, code, rodata, functions }; }
 };
 
 static Build load(const std::string& tag) {
@@ -44,11 +45,20 @@ static Build load(const std::string& tag) {
     uint64_t x = 0, y = 0;
     while (m >> k) {
         if (k == "size") { m >> x; continue; }
+        if (k == "function") {
+            uint64_t entry;
+            if (!(m >> entry >> x >> y)) throw std::runtime_error("Invalid function span record");
+            auto it = std::find_if(b.functions.begin(), b.functions.end(), [&](const auto& fn) { return fn.entry == entry; });
+            if (it == b.functions.end()) b.functions.push_back({entry, {{x,y}}});
+            else it->spans.push_back({x,y});
+            continue;
+        }
         m >> x >> y;
         if (k == "code") b.code.push_back({ x, y });
         else if (k == "rodata") b.rodata.push_back({ x, y });
-        else if (k == "func") b.funcs.push_back({ x, y });
+        else throw std::runtime_error("Unknown manifest record: " + k);
     }
+    generate::validate_functions(b.view());
     return b;
 }
 
@@ -96,9 +106,9 @@ int main(int argc, char** argv) {
     size_t multi = 0, multi_correct = 0, single = 0, single_correct = 0;
     size_t consensus = 0, consensus_right = 0;
 
-    const size_t step = std::max<size_t>(1, A.funcs.size() / sample);
-    for (size_t i = 0; i < A.funcs.size(); i += step) {
-        const uint64_t t = A.funcs[i].begin;
+    const size_t step = std::max<size_t>(1, A.functions.size() / sample);
+    for (size_t i = 0; i < A.functions.size(); i += step) {
+        const uint64_t t = A.functions[i].entry;
         auto g = gt.find(t);
         if (g == gt.end())
             continue;                      // no ground truth for this target

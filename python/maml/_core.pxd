@@ -22,7 +22,7 @@ cdef class Image:
     # empty by default -- declared here for the same reason `sections` is.
     cdef public list code
     cdef public list rodata
-    cdef public list funcs
+    cdef public list functions
 
     cdef const uint8_t* _data(self) noexcept nogil
 

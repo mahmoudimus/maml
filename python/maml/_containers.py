@@ -16,11 +16,61 @@ class Range:
     executable: bool = False
 
 
+@dataclass(frozen=True)
+class Function:
+    """One buffer-relative entry with disjoint, half-open coverage spans."""
+    entry: int
+    spans: tuple
+
+    def __post_init__(self):
+        def address(v):
+            if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 0xffffffffffffffff:
+                raise ValueError("Function addresses must be unsigned 64-bit integers")
+            return v
+        address(self.entry)
+        ranges = []
+        for item in self.spans:
+            lo, hi = (item.begin, item.end) if hasattr(item, 'begin') else item
+            address(lo)
+            address(hi)
+            if lo >= hi:
+                raise ValueError("Function spans must be nonempty")
+            ranges.append((lo, hi))
+        merged = []
+        for lo, hi in sorted(ranges):
+            if merged and lo <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+            else:
+                merged.append((lo, hi))
+        if not any(lo <= self.entry < hi for lo, hi in merged):
+            raise ValueError("Function entry must be covered by its spans")
+        object.__setattr__(self, 'spans', tuple(merged))
+
+
+def validate_functions(functions, size):
+    """Snapshot function ownership; reject ambiguous cross-function coverage."""
+    functions = tuple(functions)
+    if any(not isinstance(f, Function) for f in functions):
+        raise TypeError("functions must contain Function(entry, spans) records")
+    functions = tuple(sorted(functions, key=lambda f: f.entry))
+    if len({f.entry for f in functions}) != len(functions):
+        raise ValueError("Duplicate function entries")
+    intervals = sorted((lo, hi, f.entry) for f in functions for lo, hi in f.spans)
+    end = 0
+    for lo, hi, entry in intervals:
+        if lo < end:
+            raise ValueError("Conflicting function span ownership")
+        if hi > size:
+            raise ValueError("Function span outside image")
+        end = hi
+    return functions
+
+
 UNW_FLAG_CHAININFO = 0x4
 
 
-def funcs_from_pdata(raw, code, buf):
-    """Primary function ranges with contiguous resolved chained coverage.
+def _resolved_pdata(raw, code, buf):
+    """Resolve primary ownership of validated .pdata records.
 
     Extracted so it is testable without building a PE: every defect found here
     -- the name-based filter, the missing chain resolution -- needed a specific
@@ -30,14 +80,13 @@ def funcs_from_pdata(raw, code, buf):
     (`<III` = begin RVA, end RVA, unwind-info RVA). `code` is the executable
     ranges; `buf` is the whole RVA-indexed image, needed to read unwind info.
     """
-    import bisect
     import struct
     records = set()
     for off in range(0, len(raw) - 11, 12):
         record = struct.unpack_from("<III", raw, off)
         begin, end, _ = record
         if (0 <= begin < end <= len(buf)
-                and any(c.begin <= begin < c.end for c in code)):
+                and any(c.begin <= begin < end <= c.end for c in code)):
             records.add(record)
 
     # Win64 UNWIND_INFO stores CountOfCodes two-byte slots after its four-byte
@@ -47,16 +96,22 @@ def funcs_from_pdata(raw, code, buf):
     roots = set()
     for record in records:
         begin, end, unwind = record
-        flags = buf[unwind] >> 3 if unwind < len(buf) else 0
+        # An unreadable or malformed header is unknown ownership, never a root.
+        if unwind + 4 > len(buf) or (buf[unwind] & 7) not in (1, 2):
+            continue
+        flags = buf[unwind] >> 3
+        if flags & ~0x7:
+            continue
+        tail = unwind + 4 + 2 * ((buf[unwind + 2] + 1) & ~1)
+        if tail > len(buf):
+            continue
         if not flags & UNW_FLAG_CHAININFO:
+            if flags & 0x3 and tail + 4 > len(buf):
+                continue
             roots.add(record)
             continue
         parents[record] = None
-        if (unwind + 4 > len(buf) or (buf[unwind] & 7) not in (1, 2)
-                or flags & ~UNW_FLAG_CHAININFO):
-            continue
-        tail = unwind + 4 + 2 * ((buf[unwind + 2] + 1) & ~1)
-        if tail + 12 > len(buf):
+        if flags & ~UNW_FLAG_CHAININFO or tail + 12 > len(buf):
             continue
         parent = struct.unpack_from("<III", buf, tail)
         # Only attach coverage to an actual table record. Invalid links never
@@ -81,49 +136,24 @@ def funcs_from_pdata(raw, code, buf):
         if root is not None:
             spans[root].append(record[:2])
 
-    # Existing consumers accept one contiguous range per function. Coalesce
-    # only connected coverage after the real entry, never a bounding box over
-    # a gap or an interval owned by another primary function.
-    ordered_roots = sorted(roots)
-    starts = [r[0] for r in ordered_roots]
-    max_ends = []
-    for _, end, _ in ordered_roots:
-        max_ends.append(max(end, max_ends[-1] if max_ends else 0))
-    out = []
-    for root in ordered_roots:
-        begin, end, _ = root
-        for lo, hi in sorted(spans[root]):
-            if lo < begin or lo > end or hi <= end:
-                continue
-            index = bisect.bisect_left(starts, hi) - 1
-            if index >= 0 and max_ends[index] > end:
-                # Includes another root whose original coverage intersects
-                # the proposed extension; fail closed on conflicting ownership.
-                continue
-            end = hi
-        out.append(Range(begin=begin, end=end, name="", executable=True))
-    return out
+    return roots, spans
+
+
+def functions_from_pdata(raw, code, buf):
+    """Resolve full chained coverage, retaining one entry per primary function."""
+    roots, spans = _resolved_pdata(raw, code, buf)
+    by_entry = {}
+    for root in roots:
+        by_entry.setdefault(root[0], []).extend(spans[root])
+    return list(validate_functions([Function(entry, coverage)
+                for entry, coverage in by_entry.items()], len(buf)))
 
 
 def flatten_pe(path):
-    """(flat RVA-indexed bytes, [Range] sections, [Range] code, [Range] rodata,
-    [Range] funcs) for a PE on disk.
+    """Return (RVA-indexed bytes, sections, code, rodata, functions).
 
-    Each section is copied to its virtual address, so an RVA indexes the buffer
-    directly -- the same shape the C++ and the offline tooling expect.
-
-    `code` holds every executable section; `rodata` every initialised,
-    non-executable data section (maml.generate's Options.deep_anchor and
-    string-anchor scanning key on these, not on `sections`).
-
-    `funcs` comes from `.pdata` when the PE has one: an array of 12-byte
-    RUNTIME_FUNCTION records (`<III` = begin RVA, end RVA, unwind-info RVA),
-    filtered to executable ranges. Valid contiguous chained spans extend their
-    primary entry's coverage; disconnected spans are not yet representable.
-    This is unwind-derived coverage, not a complete function list. `.pdata` is x64-specific
-    (table-based SEH) and PE32 images do not have one; `funcs` is left empty
-    when it is absent, which is a documented no-op for maml.generate, not
-    a failure.
+    Functions contain one primary entry and all resolved coverage spans.
+    Missing .pdata yields no function metadata; leaf functions may be absent.
     """
     try:
         import lief
@@ -172,9 +202,8 @@ def flatten_pe(path):
         if s.name == ".pdata":
             pdata_range = (va, r_end)
 
-    funcs = []
+    functions = []
     if pdata_range is not None:
         pstart, pend = pdata_range
-        funcs = funcs_from_pdata(bytes(buf[pstart:pend]), code, buf)
-
-    return bytes(buf), ranges, code, rodata, funcs
+        functions = functions_from_pdata(bytes(buf[pstart:pend]), code, buf)
+    return bytes(buf), ranges, code, rodata, functions

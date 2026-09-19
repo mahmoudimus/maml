@@ -18,7 +18,7 @@ from maml.v1 import (
     unique_matches,
 )
 from . import v1
-from maml._containers import Range
+from maml._containers import Range, Function
 
 __version__ = "%d.%d.%d" % cpp_version()
 
@@ -34,6 +34,7 @@ __all__ = [
     "PipelineBuilder",
     "PipelineResult",
     "Range",
+    "Function",
     "SchemaError",
     "StageResult",
     "cpp_version",

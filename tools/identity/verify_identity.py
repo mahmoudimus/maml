@@ -155,13 +155,13 @@ def claims_from_maml(primary, secondary, sample):
 
     img_a = maml.Image.from_pe(str(primary))
     img_b = maml.Image.from_pe(str(secondary))
-    if not img_a.funcs:
+    if not img_a.functions:
         raise SystemExit(f"{primary} has no .pdata; nothing to sample")
 
-    step = max(1, len(img_a.funcs) // sample)
+    step = max(1, len(img_a.functions) // sample)
     claims, skipped, out_of_range = [], 0, 0
-    for r in img_a.funcs[::step][:sample]:
-        cands = generate.candidates(img_a, r.begin)
+    for r in img_a.functions[::step][:sample]:
+        cands = generate.candidates(img_a, r.entry)
         resolved = None
         for c in cands:
             try:
@@ -187,7 +187,7 @@ def claims_from_maml(primary, secondary, sample):
         if resolved is None:
             skipped += 1
             continue
-        claims.append(Claim(f"fn_{r.begin:x}", r.begin, resolved))
+        claims.append(Claim(f"fn_{r.entry:x}", r.entry, resolved))
     return claims, skipped, out_of_range
 
 
@@ -208,13 +208,13 @@ def run_durability(args, index, size_b):
 
     img_a = maml.Image.from_pe(str(args.primary))
     img_b = maml.Image.from_pe(str(args.secondary))
-    if not img_a.funcs:
+    if not img_a.functions:
         raise SystemExit(f"{args.primary} has no .pdata; nothing to sample")
 
-    step = max(1, len(img_a.funcs) // args.sample)
+    step = max(1, len(img_a.functions) // args.sample)
     tried = anchored = no_gt = 0
-    for r in img_a.funcs[::step][:args.sample]:
-        hit = index.lookup(r.begin)
+    for r in img_a.functions[::step][:args.sample]:
+        hit = index.lookup(r.entry)
         if hit is None:
             no_gt += 1
             continue                      # BinDiff has no opinion: not a failure
@@ -223,7 +223,7 @@ def run_durability(args, index, size_b):
             no_gt += 1
             continue
         tried += 1
-        if generate.verified(img_a, r.begin, img_b, rva_b):
+        if generate.verified(img_a, r.entry, img_b, rva_b):
             anchored += 1
 
     print(f"# sampled    {args.sample} function entries from build A", file=sys.stderr)

@@ -20,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -33,8 +34,13 @@ namespace maml {
             uint64_t end = 0;
         };
 
+        struct Function {
+            uint64_t entry = 0;
+            std::vector<Range> spans;
+        };
+
         // A flat, RVA-indexed image plus what the caller knows that the bytes
-        // do not say. `funcs` is optional: absent, a byte window is used and
+        // do not say. `functions` is optional: absent, a byte window is used and
         // the results are merely worse, not wrong. If supplied it must already
         // be chain-resolved -- UNW_FLAG_CHAININFO fragments are not function
         // starts, a trap this project walked into four separate times.
@@ -42,7 +48,7 @@ namespace maml {
             std::span<const uint8_t> bytes;
             std::span<const Range> code;
             std::span<const Range> rodata;
-            std::span<const Range> funcs = {};
+            std::span<const Function> functions = {};
         };
 
         enum class Strategy { Body,
@@ -595,57 +601,59 @@ namespace maml {
             return s;
         }
 
-        // The `funcs` range containing `at`, or nullptr when `funcs` is empty
-        // or nothing covers it. StringAnchor's depth 0 and depth 1 differ ONLY
-        // by which function holds the load site, so "not contained" has to be
-        // distinguishable from "contained by a range that happens to begin at
-        // 0" -- hence a pointer rather than an index or a Range by value.
-        //
-        // ORDER-INDEPENDENT BY CONSTRUCTION. `funcs` is caller-supplied and
-        // this header states no sortedness or disjointness precondition on it;
-        // returning the first range that happens to cover `at` would make the
-        // answer -- and with it StringAnchor's depth-0-vs-depth-1 choice and
-        // every clamped tail length -- depend on the order the caller listed
-        // its functions in. So the TIGHTEST covering range wins: smallest
-        // width, ties broken by the lowest `begin`, then by the lowest `end`.
-        // That is a total order on the covering set, so the same `funcs`
-        // content always yields the same answer however it is permuted.
-        //
-        // Tightest rather than first is also the right answer on the merits:
-        // where ranges nest (a chain-resolved function inside a region, say),
-        // the innermost is the one whose end a tail must not run past.
-        inline const Range* enclosing_func(const Image& img, uint64_t at) {
-            const Range* best = nullptr;
-            for (const Range& r : img.funcs) {
-                if (at < r.begin || at >= r.end)
-                    continue;
-                if (!best) {
-                    best = &r;
-                    continue;
+        // Function identity, full coverage, and the span containing the query.
+        struct FunctionView {
+            uint64_t entry;
+            std::span<const Range> spans;
+            Range containing;
+        };
+
+        inline void validate_functions(const Image& img) {
+            std::unordered_set<uint64_t> entries;
+            std::vector<std::tuple<uint64_t, uint64_t, uint64_t>> intervals;
+            for (const auto& f : img.functions) {
+                if (!entries.insert(f.entry).second)
+                    throw v1::Error("InvalidArgument", "Duplicate function entries");
+                bool covered = false;
+                for (auto r : f.spans) {
+                    if (r.begin >= r.end || r.end > img.bytes.size())
+                        throw v1::Error("InvalidArgument", "Invalid function span");
+                    covered |= r.begin <= f.entry && f.entry < r.end;
+                    intervals.emplace_back(r.begin, r.end, f.entry);
                 }
-                const uint64_t rw = r.end - r.begin, bw = best->end - best->begin;
-                if (rw < bw || (rw == bw && (r.begin < best->begin || (r.begin == best->begin && r.end < best->end))))
-                    best = &r;
+                if (!covered)
+                    throw v1::Error("InvalidArgument", "Function entry must be covered");
             }
-            return best;
+            std::sort(intervals.begin(), intervals.end());
+            uint64_t end = 0;
+            for (auto [lo, hi, entry] : intervals) {
+                if (lo < end)
+                    throw v1::Error("InvalidArgument", "Overlapping function spans");
+                end = hi;
+            }
         }
 
-        // When `img.funcs` is non-empty and one of its ranges contains
-        // `anchor`, clamp `take` to what remains of THAT range so a tail never
-        // runs into the next function's prologue, alignment padding, or data.
-        // With `funcs` empty (the Task 1-4 default), or with no range
-        // containing `anchor`, this is a no-op -- behaviour stays byte-
-        // identical to before this existed, which is what let the milestone
-        // ship with a byte window and merely worse (not wrong) results.
-        //
-        // Shares enclosing_func's tightest-covering rule rather than repeating
-        // a scan of its own: the two used to answer independently, so an
-        // overlapping or reordered `funcs` could clamp against one range while
-        // the depth decision was made against another.
+        // Resolve identity and the containing span from one metadata model.
+        inline std::optional<FunctionView> enclosing_function(const Image& img, uint64_t at) {
+            for (const auto& f : img.functions)
+                for (auto r : f.spans)
+                    if (r.begin <= at && at < r.end)
+                        return FunctionView{ f.entry, f.spans, r };
+            return std::nullopt;
+        }
+
+        // A sequential literal run cannot leave its containing coverage span.
+        // Unknown coverage retains the caller's bounded byte-window behavior.
         inline size_t clamp_to_func(const Image& img, uint64_t anchor, size_t take) {
-            if (const Range* r = enclosing_func(img, anchor))
-                return (std::min)(take, (size_t)(r->end - anchor));
+            if (auto f = enclosing_function(img, anchor))
+                return (std::min)(take, (size_t)(f->containing.end - anchor));
             return take;
+        }
+
+        inline size_t clamp_reference_tail(const Image& img, uint64_t site, uint64_t after, size_t take) {
+            if (auto f = enclosing_function(img, site))
+                return after >= f->containing.end ? 0 : std::min(take, size_t(f->containing.end - after));
+            return clamp_to_func(img, after, take);
         }
 
         namespace detail {
@@ -828,6 +836,7 @@ namespace maml {
                 throw v1::Error("InvalidArgument", "Unknown generator dialect");
             if (opt.nibble_wildcards && opt.dialect != "maml-v1")
                 throw v1::Error("InvalidArgument", "Nibble generation requires maml-v1");
+            validate_functions(img);
             std::vector<Candidate> out;
             const size_t n = img.bytes.size();
             auto seed_for = [&](const std::string& pattern) {
@@ -878,7 +887,7 @@ namespace maml {
                 if (after >= n)
                     continue;
                 size_t take = (std::min)(opt.max_len, (size_t)(n - after));
-                take = clamp_to_func(img, after, take);
+                take = clamp_reference_tail(img, site, after, take);
                 if (take == 0)
                     continue;
 
@@ -977,6 +986,12 @@ namespace maml {
                             continue;   // try the next, deeper offset
                         }
 
+                        if (!img.functions.empty()) {
+                            const auto owner = enclosing_function(img, target);
+                            const auto anchor_owner = enclosing_function(img, anchor);
+                            if (owner && (!anchor_owner || owner->entry != anchor_owner->entry))
+                                continue;
+                        }
                         size_t take = (std::min)(opt.max_len, (size_t)(n - anchor));
                         take = clamp_to_func(img, anchor, take);
                         if (take == 0)
@@ -1100,7 +1115,7 @@ namespace maml {
                 const auto lea_index = rip_lea_index(img, wanted);
 
                 const std::vector<uint64_t> to_target = callers_of(img, target);
-                const Range* target_fn = enclosing_func(img, target);
+                const auto target_fn = enclosing_function(img, target);
 
                 // Ascending RVA, because strings() guarantees that order and a
                 // generator that emits a different anchor set on the same image
@@ -1133,7 +1148,8 @@ namespace maml {
                     const std::string lea =
                         hex_bytes(base + site, 3) + " ?? ?? ?? ??";
 
-                    const bool at_target = target_fn && site >= target_fn->begin && site < target_fn->end;
+                    const auto site_owner = enclosing_function(img, site);
+                    const bool at_target = target_fn && site_owner && target_fn->entry == site_owner->entry;
                     const int depth = at_target ? 0 : 1;
                     if (depth > kMaxStringAnchorDepth)
                         continue;
@@ -1152,7 +1168,7 @@ namespace maml {
                         if (opt.max_len <= 7)
                             continue;
                         size_t take = (std::min)(opt.max_len - 7, (size_t)(n - after));
-                        take = clamp_to_func(img, after, take);
+                        take = clamp_reference_tail(img, site, after, take);
                         if (take == 0)
                             continue;
 
@@ -1184,10 +1200,10 @@ namespace maml {
                     const uint64_t call_hi = site + opt.max_len - 5; // inclusive
 
                     // The FIRST call to the target at or after the lea. Bounded
-                    // by the enclosing function when funcs says what that is --
+                    // by the enclosing function when functions metadata supplies ownership --
                     // and when it does not, bounded only by the budget: R8's
                     // rule is that an unknown function bound is not guessed at.
-                    const Range* site_fn = enclosing_func(img, site);
+                    const auto site_fn = enclosing_function(img, site);
                     uint64_t call = 0;
                     bool found = false;
                     for (uint64_t cs : to_target) { // ascending
@@ -1195,7 +1211,7 @@ namespace maml {
                             continue;
                         if (cs > call_hi)
                             break; // past the budget, and to_target only grows
-                        if (site_fn && cs + 5 > site_fn->end)
+                        if (site_fn && cs + 5 > site_fn->containing.end)
                             continue;
                         call = cs;
                         found = true;
@@ -1306,7 +1322,7 @@ namespace maml {
                     size_t take = 0;
                     if (after < n && opt.max_len > head_len) {
                         take = (std::min)(opt.max_len - head_len, (size_t)(n - after));
-                        take = clamp_to_func(img, after, take);
+                        take = clamp_reference_tail(img, ref.site, after, take);
                         if (take && opt.prefer_short)
                             take = detail::shortest_unique_tail(img.bytes, head + " ",
                                 base + after, take, 1);

@@ -625,21 +625,21 @@ TEST_CASE("verified compares match minus delta, not the raw match", "[generate][
     REQUIRE(it->anchor_delta != 0);   // the trap: this must not be 0 or the branch goes untested
 }
 
-// --- funcs: clamp the tail so it does not run into the next function -------
+// --- functions: clamp the tail so it does not run into the next function -------
 
-TEST_CASE("Xref clamps the tail to the function containing the call site when funcs is supplied",
-          "[generate][xref][funcs]") {
+TEST_CASE("Xref clamps the tail to the function containing the call site when functions is supplied",
+          "[generate][xref][functions]") {
     const std::vector<uint8_t> tail{ 0x4C, 0x8B, 0xD0, 0x48, 0x85, 0xC0,
                                       0x74, 0xC8, 0x90, 0x90, 0x90, 0x90 };
     auto bytes = make_xref_image(0x100, { 0x200 }, tail);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     // The call site (0x200) lands at 0x205 after the E8+rel32; the function
     // containing it ends at 0x209 -- four bytes of real tail, not all twelve.
-    std::vector<generate::Range> funcs{ { 0x1F0, 0x209 } };
-    generate::Image img{ bytes, code, {}, funcs };
+    std::vector<generate::Function> functions{ { 0x1F0, { { 0x1F0, 0x209 } } } };
+    generate::Image img{ bytes, code, {}, functions };
 
     // Body can also appear for this target now (its window, at 0x100, sits
-    // outside `funcs` entirely so it is unaffected), so pick out the Xref one.
+    // outside `functions` entirely so it is unaffected), so pick out the Xref one.
     // prefer_short off: the clamp is the constraint under test, and
     // uniqueness-driven shortening would sit in front of it.
     generate::Options o;
@@ -654,17 +654,17 @@ TEST_CASE("Xref clamps the tail to the function containing the call site when fu
     REQUIRE(it->pattern == "E8 rel32(target) 4C 8B D0 48");
 }
 
-TEST_CASE("Xref's tail is unchanged from current behaviour when funcs is empty",
-          "[generate][xref][funcs]") {
+TEST_CASE("Xref's tail is unchanged from current behaviour when functions is empty",
+          "[generate][xref][functions]") {
     const std::vector<uint8_t> tail{ 0x4C, 0x8B, 0xD0, 0x48, 0x85, 0xC0,
                                       0x74, 0xC8, 0x90, 0x90, 0x90, 0x90 };
     auto bytes = make_xref_image(0x100, { 0x200 }, tail);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
-    generate::Image img{ bytes, code, {}, {} };   // no funcs supplied
+    generate::Image img{ bytes, code, {}, {} };   // no functions supplied
 
     // Body can also appear for this target now, so pick out the Xref one.
     // prefer_short off: what is unchanged from Tasks 1-4 is the UNCLAMPED
-    // tail, which is a statement about funcs, not about uniqueness.
+    // tail, which is a statement about functions, not about uniqueness.
     generate::Options o;
     o.max_len = 12;
     o.prefer_short = false;
@@ -677,15 +677,15 @@ TEST_CASE("Xref's tail is unchanged from current behaviour when funcs is empty",
     REQUIRE(it->pattern == "E8 rel32(target) 4C 8B D0 48 85 C0 74 C8 90 90 90 90");
 }
 
-TEST_CASE("Body clamps its window to the function containing the anchor when funcs is supplied",
-          "[generate][body][funcs]") {
+TEST_CASE("Body clamps its window to the function containing the anchor when functions is supplied",
+          "[generate][body][functions]") {
     std::vector<uint8_t> bytes(0x1000, 0xCC);
     const std::vector<uint8_t> body{ 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57 };
     for (size_t k = 0; k < body.size(); ++k) bytes[0x400 + k] = body[k];
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     // The function containing the target ends 4 bytes into the body.
-    std::vector<generate::Range> funcs{ { 0x400, 0x404 } };
-    generate::Image img{ bytes, code, {}, funcs };
+    std::vector<generate::Function> functions{ { 0x400, { { 0x400, 0x404 } } } };
+    generate::Image img{ bytes, code, {}, functions };
 
     generate::Options o;
     o.max_len = 6;   // would capture the whole `body` array if nothing clamped it
@@ -697,13 +697,13 @@ TEST_CASE("Body clamps its window to the function containing the anchor when fun
     REQUIRE(cs[0].pattern == "48 89 5C 24");
 }
 
-TEST_CASE("Body's window is unchanged from current behaviour when funcs is empty",
-          "[generate][body][funcs]") {
+TEST_CASE("Body's window is unchanged from current behaviour when functions is empty",
+          "[generate][body][functions]") {
     std::vector<uint8_t> bytes(0x1000, 0xCC);
     const std::vector<uint8_t> body{ 0x48, 0x89, 0x5C, 0x24, 0x08, 0x57 };
     for (size_t k = 0; k < body.size(); ++k) bytes[0x400 + k] = body[k];
     std::vector<generate::Range> code{ { 0, 0x1000 } };
-    generate::Image img{ bytes, code, {}, {} };   // no funcs supplied
+    generate::Image img{ bytes, code, {}, {} };   // no functions supplied
 
     generate::Options o;
     o.max_len = 6;
@@ -1238,8 +1238,8 @@ TEST_CASE("StringAnchor anchors on the lea when the load site is in the target's
     auto bytes = make_depth0_image(kSaRodataBegin);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     // prefer_short off: what this pins is the SHAPE of a depth-0 anchor --
     // wildcarded displacement, whole-pattern max_len budget -- and
@@ -1276,8 +1276,8 @@ TEST_CASE("StringAnchor keeps the lea's modrm literal while wildcarding its disp
     put_bytes(bytes, 0x127, { 0x4C, 0x8B, 0xD0 });
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     generate::Options o;
     o.prefer_short = false;   // keep the whole tail, so the modrm is not the only literal left
@@ -1307,9 +1307,9 @@ TEST_CASE("a StringAnchor pattern survives the string moving between builds",
 
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
-    generate::Image ia{ a, code, rodata, funcs };
-    generate::Image ib{ b, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
+    generate::Image ia{ a, code, rodata, functions };
+    generate::Image ib{ b, code, rodata, functions };
 
     auto v = generate::verified(ia, 0x100, ib, 0x100);
     REQUIRE(count_sa(v) == 1);
@@ -1331,17 +1331,17 @@ TEST_CASE("a string whose bytes occur twice in rodata anchors nothing",
     };
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
 
     auto dup = build("DUPLICATED_TEXT");
-    generate::Image idup{ dup, code, rodata, funcs };
+    generate::Image idup{ dup, code, rodata, functions };
     REQUIRE(count_sa(generate::candidates(idup, 0x100)) == 0);
 
     // Positive control on the identical fixture: change only the second copy's
     // text and the very same lea now anchors a candidate. Without this the
     // assertion above would also pass if StringAnchor were broken outright.
     auto uniq = build("SOMETHING_ELSE_ENTIRELY");
-    generate::Image iuniq{ uniq, code, rodata, funcs };
+    generate::Image iuniq{ uniq, code, rodata, functions };
     REQUIRE(count_sa(generate::candidates(iuniq, 0x100)) == 1);
 }
 
@@ -1356,15 +1356,15 @@ TEST_CASE("a string loaded from two sites anchors nothing", "[generate][stringan
     put_lea(bytes, 0x200, 0x1000);                     // and a second loader
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 }, { 0x200, 0x280 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } }, { 0x200, { { 0x200, 0x280 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
     REQUIRE(generate::rip_refs_to(img, 0x1000).size() == 2);   // the fixture is what it claims
     REQUIRE(count_sa(generate::candidates(img, 0x100)) == 0);
 
     // Positive control: erase the second loader, keep everything else, and the
     // first lea anchors a candidate again.
     clear_bytes(bytes, 0x200, 7);
-    generate::Image one{ bytes, code, rodata, funcs };
+    generate::Image one{ bytes, code, rodata, functions };
     REQUIRE(generate::rip_refs_to(one, 0x1000).size() == 1);
     REQUIRE(count_sa(generate::candidates(one, 0x100)) == 1);
 }
@@ -1385,8 +1385,8 @@ TEST_CASE("StringAnchor spans lea to call when the load site is in a direct call
     auto bytes = make_depth1_image(0x21A);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x280 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x280 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     auto cs = generate::candidates(img, 0x100);
     const auto* c = first_sa(cs);
@@ -1412,7 +1412,7 @@ TEST_CASE("StringAnchor spans lea to call when the load site is in a direct call
     // is; the pattern wildcards the string's displacement and captures the
     // callee out of the `E8`, so it names 0x140 there without being reissued.
     auto bytes_b = make_depth1_image(0x21A, 0x140);
-    std::vector<generate::Range> funcs_b{ { 0x140, 0x180 }, { 0x200, 0x280 } };
+    std::vector<generate::Function> funcs_b{ { 0x140, { { 0x140, 0x180 } } }, { 0x200, { { 0x200, 0x280 } } } };
     generate::Image img_b{ bytes_b, code, rodata, funcs_b };
     REQUIRE(count_sa(generate::verified(img, 0x100, img_b, 0x140)) == 1);
 }
@@ -1429,8 +1429,8 @@ TEST_CASE("StringAnchor does not chase a grandcaller's string", "[generate][stri
     put_call(bytes, 0x210, 0x100);                     // F -> target
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x240 }, { 0x300, 0x380 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x240 } } }, { 0x300, { { 0x300, 0x380 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
     REQUIRE(generate::callers_of(img, 0x200) == std::vector<uint64_t>{ 0x31A });   // G really calls F
     REQUIRE(generate::callers_of(img, 0x100) == std::vector<uint64_t>{ 0x210 });   // F really calls the target
     REQUIRE(count_sa(generate::candidates(img, 0x100)) == 0);
@@ -1438,7 +1438,7 @@ TEST_CASE("StringAnchor does not chase a grandcaller's string", "[generate][stri
     // Positive control: point G's call straight at the target and the same lea
     // anchors a depth-1 candidate.
     put_call(bytes, 0x31A, 0x100);
-    generate::Image direct{ bytes, code, rodata, funcs };
+    generate::Image direct{ bytes, code, rodata, functions };
     auto cs = generate::candidates(direct, 0x100);
     REQUIRE(count_sa(cs) == 1);
     REQUIRE(first_sa(cs)->save_index == 0);
@@ -1449,7 +1449,7 @@ TEST_CASE("StringAnchor's call must lie in the same function as the lea",
           "[generate][stringanchor]") {
     // The call to the target is close enough to the lea to fit the budget, but
     // it belongs to the NEXT function -- so the lea's own function does not
-    // call the target and there is nothing to anchor. Only the funcs bound can
+    // call the target and there is nothing to anchor. Only the functions bound can
     // reject this; a budget-only check accepts it and emits a pattern spanning
     // two functions.
     std::vector<uint8_t> bytes(kSaSize, 0xCC);
@@ -1458,21 +1458,21 @@ TEST_CASE("StringAnchor's call must lie in the same function as the lea",
     put_call(bytes, 0x330, 0x100);                     // 0x330 + 5 > 0x328
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x300, 0x328 }, { 0x328, 0x380 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x300, { { 0x300, 0x328 } } }, { 0x328, { { 0x328, 0x380 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
     REQUIRE(count_sa(generate::candidates(img, 0x100)) == 0);
 
     // Positive control: widen the lea's function to cover the call and the same
     // bytes now anchor. The span is well inside the default 64-byte budget
     // either way, so the budget is not what changed.
-    std::vector<generate::Range> wide{ { 0x100, 0x140 }, { 0x300, 0x380 } };
+    std::vector<generate::Function> wide{ { 0x100, {{0x100, 0x140}} }, { 0x300, {{0x300, 0x380}} } };
     generate::Image inside{ bytes, code, rodata, wide };
     REQUIRE(count_sa(generate::candidates(inside, 0x100)) == 1);
 }
 
-TEST_CASE("with funcs empty StringAnchor emits only the depth-1 form",
+TEST_CASE("with functions empty StringAnchor emits only the depth-1 form",
           "[generate][stringanchor]") {
-    // Without funcs there is no way to say which function holds the lea, so
+    // Without functions there is no way to say which function holds the lea, so
     // depth 0 -- which is defined entirely by that containment -- cannot be
     // established and is not guessed at.
     auto bytes = make_depth1_image(0x21A);
@@ -1489,9 +1489,9 @@ TEST_CASE("with funcs empty StringAnchor emits only the depth-1 form",
     REQUIRE(c->pattern == "48 8D 0D ?? ?? ?? ?? 4C 8B D0 E8 rel32(target)");
 }
 
-TEST_CASE("with funcs empty a lea with no call to the target after it anchors nothing",
+TEST_CASE("with functions empty a lea with no call to the target after it anchors nothing",
           "[generate][stringanchor]") {
-    // The same bytes as the depth-0 fixture, minus any funcs. The lea sits
+    // The same bytes as the depth-0 fixture, minus any functions. The lea sits
     // where the target's own function would be, but nothing says so, and
     // emitting a depth-0 candidate on that assumption would produce an
     // anchor_delta computed from a guess.
@@ -1511,8 +1511,8 @@ TEST_CASE("StringAnchor emits nothing rather than a pattern too short to reach t
     auto bytes = make_depth1_image(0x290);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x300 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x300 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
     REQUIRE(count_sa(generate::candidates(img, 0x100)) == 0);
 
     // Raise the budget past the span and the same bytes anchor.
@@ -1535,8 +1535,8 @@ TEST_CASE("StringAnchor runs after Body and inside the same anchor budget",
     auto bytes = make_depth1_image(0x21A);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x280 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x280 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     auto cs = generate::candidates(img, 0x100);
     std::vector<generate::Strategy> got;
@@ -1557,8 +1557,8 @@ TEST_CASE("a StringAnchor candidate carries the seed select_seed would choose",
     auto bytes = make_depth0_image(kSaRodataBegin);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     auto cs = generate::candidates(img, 0x100);
     const auto* c = first_sa(cs);
@@ -1577,8 +1577,8 @@ TEST_CASE("StringAnchor anchors nothing when the image has no rodata to draw on"
     // filters choose a string to anchor on, they never suppress anything else.
     auto bytes = make_depth1_image(0x21A);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x280 } };
-    generate::Image img{ bytes, code, {}, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x280 } } } };
+    generate::Image img{ bytes, code, {}, functions };
     auto cs = generate::candidates(img, 0x100);
     REQUIRE(count_sa(cs) == 0);
     REQUIRE(cs.size() == 2);                           // Xref and Body still emit
@@ -2149,14 +2149,14 @@ static std::vector<uint8_t> make_all_four_image(uint64_t target = 0x100,
 
 static const std::vector<generate::Range> kAllFourCode{ { 0, 0x1000 } };
 static const std::vector<generate::Range> kAllFourRodata{ { 0x1000, 0x1400 } };
-static const std::vector<generate::Range> kAllFourFuncs{
-    { 0x100, 0x180 }, { 0x200, 0x280 }, { 0x300, 0x380 }
+static const std::vector<generate::Function> kAllFourFuncs{
+    { 0x100, { { 0x100, 0x180 } } }, { 0x200, { { 0x200, 0x280 } } }, { 0x300, { { 0x300, 0x380 } } }
 };
 
 // The same shape, relocated: target 0x400, its string at 0x1100, its caller at
 // 0x510 and its rip-relative load at 0x610.
-static const std::vector<generate::Range> kAllFourFuncsB{
-    { 0x400, 0x480 }, { 0x500, 0x580 }, { 0x600, 0x680 }
+static const std::vector<generate::Function> kAllFourFuncsB{
+    { 0x400, { { 0x400, 0x480 } } }, { 0x500, { { 0x500, 0x580 } } }, { 0x600, { { 0x600, 0x680 } } }
 };
 
 TEST_CASE("every strategy reports the site it anchored on",
@@ -2327,8 +2327,8 @@ TEST_CASE("dedup keys on the resolving triple, not on the pattern text alone",
     put_bytes(bytes, 0x147, shared);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x180 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x180 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     generate::Options o;
     o.want = 8;
@@ -2423,8 +2423,8 @@ TEST_CASE("prefer_short never shortens a run a later atom depends on",
     auto bytes = make_depth1_image(0x21A);
     std::vector<generate::Range> code{ { 0, 0x1000 } };
     std::vector<generate::Range> rodata{ { kSaRodataBegin, kSaRodataEnd } };
-    std::vector<generate::Range> funcs{ { 0x100, 0x140 }, { 0x200, 0x280 } };
-    generate::Image img{ bytes, code, rodata, funcs };
+    std::vector<generate::Function> functions{ { 0x100, { { 0x100, 0x140 } } }, { 0x200, { { 0x200, 0x280 } } } };
+    generate::Image img{ bytes, code, rodata, functions };
 
     auto cs = generate::candidates(img, 0x100);   // prefer_short on, by default
     const auto* c = first_sa(cs);
@@ -2522,7 +2522,7 @@ TEST_CASE("verified still returns at most `want`", "[generate][integration][veri
 
 // ---------------------------------------------------------------------------
 // The review fixes: a round-robin budget, RipRef's literal context, the floor
-// on a trailing run, order-independent `funcs`, and verified()'s refusal to
+// on a trailing run, order-independent `functions`, and verified()'s refusal to
 // treat one image as two builds.
 
 TEST_CASE("the anchor budget is spent round-robin, not in strategy order",
@@ -2692,30 +2692,22 @@ TEST_CASE("a trailing literal run never shortens below the floor",
     REQUIRE(generate::detail::resolves_uniquely(bytes, *body, 0x400));
 }
 
-TEST_CASE("enclosing_func and clamp_to_func do not depend on the order of funcs",
-          "[generate][funcs]") {
-    // `funcs` is caller-supplied and this header states no sortedness or
-    // disjointness precondition on it. A first-match rule therefore let the
-    // caller's LISTING ORDER decide StringAnchor's depth-0-vs-depth-1 choice
-    // and every clamped tail length. The tightest covering range wins
-    // instead, which is a total order and so order-independent.
+TEST_CASE("function ownership is order independent and rejects ambiguity", "[generate][functions]") {
     std::vector<uint8_t> bytes(0x1000, 0xCC);
-    std::vector<generate::Range> code{ { 0, 0x1000 } };
-    std::vector<generate::Range> wide_first{ { 0x200, 0x300 }, { 0x208, 0x220 } };
-    std::vector<generate::Range> tight_first{ { 0x208, 0x220 }, { 0x200, 0x300 } };
-    generate::Image a{ bytes, code, {}, wide_first };
-    generate::Image b{ bytes, code, {}, tight_first };
-
-    REQUIRE(generate::enclosing_func(a, 0x210) != nullptr);
-    REQUIRE(generate::enclosing_func(a, 0x210)->end == 0x220);
-    REQUIRE(generate::enclosing_func(b, 0x210)->end == 0x220);
+    std::vector<generate::Function> first{{0x200, {{0x200,0x208},{0x230,0x240}}}, {0x208, {{0x208,0x220}}}};
+    auto second = first;
+    std::reverse(second.begin(), second.end());
+    generate::Image a{bytes, {}, {}, first}, b{bytes, {}, {}, second};
+    generate::validate_functions(a);
+    generate::validate_functions(b);
+    REQUIRE(generate::enclosing_function(a, 0x210)->entry == 0x208);
+    REQUIRE(generate::enclosing_function(b, 0x210)->entry == 0x208);
+    REQUIRE(generate::enclosing_function(a, 0x235)->entry == 0x200);
     REQUIRE(generate::clamp_to_func(a, 0x210, 64) == 0x10);
     REQUIRE(generate::clamp_to_func(b, 0x210, 64) == 0x10);
-
-    // Uncovered stays distinguishable from covered-by-a-range-beginning-at-0,
-    // and stays a no-op for the clamp.
-    REQUIRE(generate::enclosing_func(a, 0x400) == nullptr);
-    REQUIRE(generate::clamp_to_func(a, 0x400, 64) == 64);
+    REQUIRE_FALSE(generate::enclosing_function(a, 0x225));
+    first[0].spans.push_back({0x210,0x215});
+    REQUIRE_THROWS_AS(generate::validate_functions(a), v1::Error);
 }
 
 TEST_CASE("verified refuses to treat one image as two builds", "[generate][verified]") {
@@ -2986,7 +2978,8 @@ namespace {
 // test that fails one time in twenty teaches people to re-run it.
 struct CrowdedImage {
     std::vector<uint8_t> bytes;
-    std::vector<generate::Range> code, rodata, funcs;
+    std::vector<generate::Range> code, rodata;
+    std::vector<generate::Function> functions;
     uint64_t target = 0;      // a function, reachable by Xref and Body
     uint64_t global = 0;      // a datum, reachable only by RipRef
 };
@@ -3062,12 +3055,12 @@ inline CrowdedImage make_crowded(unsigned variant, size_t decoys = 400) {
 
     img.code = { { 0, code_end } };
     img.rodata = { { code_end, n } };
-    img.funcs = { { img.target, img.target + 0x80 } };
+    img.functions = { { img.target, { { img.target, img.target + 0x80 } } } };
     return img;
 }
 
 inline generate::Image view(const CrowdedImage& c) {
-    return generate::Image{ c.bytes, c.code, c.rodata, c.funcs };
+    return generate::Image{ c.bytes, c.code, c.rodata, c.functions };
 }
 
 } // namespace

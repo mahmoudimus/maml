@@ -101,3 +101,42 @@ links, cycles, truncation, incompatible flags, executable coverage, and
 conflicting primary entries are tested. Disconnected coverage is deliberately
 not coalesced across gaps. These are synthetic fixtures; the actual 69893 PE
 was not supplied or executed. No C++ runtime or binding changes were needed.
+
+## Noncontiguous function coverage (initial validation)
+
+Entry-plus-spans metadata passed all 238 Python tests and 131 C++ cases
+(804 assertions), plus the existing 60 matcher/projection conformance vectors.
+The 15 new Python tests cover separated tails, gap functions, strict entries,
+full-metadata precedence, malformed ownership, a fragment before its entry,
+generator string anchors and span-boundary clamping, and an actual synthetic PE
+written to disk and loaded through both Python image interfaces.
+
+The rebuilt CLI returned both parent entries for distinct matching functions and
+searched only the selected parent's starts when a matching neighbor occupied the
+gap. A wheel built from this checkout was installed into an isolated environment;
+`tools/verify_wheel.py --expect-simd neon` passed, including a split-function
+pipeline through the packaged native binding. No actual 69893 PE was supplied
+and no live IDA integration was tested. The previous contiguous-only limitation
+was superseded by this initial implementation. The compatibility projection in
+that initial validation has since been removed; see the canonical API below.
+
+
+## Canonical function metadata API
+
+The final API uses `Function(entry, spans)` / `functions` throughout C++, Cython,
+Python, the CLI, and generation. Range-only function input and the old CLI
+`func BEGIN END` record are removed. `flatten_pe` returns five items, with full
+function records as the fifth; native consumers must rebuild.
+
+Validation passed 252 Python tests, 131 C++ cases (804 assertions), and the
+existing 60 matcher/projection vectors. A middle-of-function signature in the
+last of 12 chained chunks resolves to the outermost entry with a nonzero image
+base, for unwind-code counts 0 through 6. Cycles, bad links, invalid primary
+headers, and truncated unwind data never promote fragments to entries. The
+pipeline searches all owned spans while leaving intervening functions distinct.
+The CLI rejects the removed manifest format and accepts the full span format.
+
+The rebuilt macOS arm64 wheel passed the installed-package smoke test outside
+the checkout, including the split-function pipeline and NEON backend check.
+These are synthetic layout and packaged execution tests, not a live test of
+`GetEffectivePosition`, `wow_call_spoof`, or the supplied game's calling ABI.
