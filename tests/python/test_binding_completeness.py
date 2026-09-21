@@ -54,6 +54,8 @@ RENAMES = {
 # C++ and forgotten is a test failure; a field added and consciously withheld
 # is one line here. The distinction is the whole value of this file.
 NOT_BOUND = {
+    ("Trace", "searched_ranges"): "Exposed inside StageResult.pointer_stats and asserted by pointer-table tests",
+    ("Trace", "candidates"): "Exposed inside StageResult.pointer_stats and asserted by pointer-table tests",
 }
 
 
@@ -138,6 +140,10 @@ def test_every_stageresult_field_is_populated(img):
     """Each field observed holding a non-default value at least once."""
     r = v1.Pipeline('bytes("41 57 41 56") -> func').run(img)
     seen = {f: False for f in py_fields(v1.StageResult)}
+    from test_pointer_tables import fixture, QUERY
+    pointer_trace = v1.Pipeline(QUERY).run(fixture()).trace[1]
+    assert pointer_trace.pointer_stats["candidates"] == 66
+    seen["pointer_stats"] = True
     for s in r.trace:
         for f in seen:
             if getattr(s, f) not in (0, "", None, [], False):
@@ -309,10 +315,10 @@ def test_they_are_still_dataclasses_and_still_frozen():
     and pass. This is the guard on the guard.
     """
     import dataclasses as dc
-    r = v1.StageResult("bytes", 1, 2)
+    r = v1.StageResult("bytes", 1, 2, None)
     assert dc.is_dataclass(r)
     assert dc.fields(v1.StageResult), "fields() empty: the checks above are vacuous"
-    assert repr(r) == "StageResult(stage='bytes', into=1, out=2)"
-    assert r == v1.StageResult("bytes", 1, 2)
+    assert repr(r) == "StageResult(stage='bytes', into=1, out=2, pointer_stats=None)"
+    assert r == v1.StageResult("bytes", 1, 2, None)
     with pytest.raises(AttributeError):
         r.into = 9

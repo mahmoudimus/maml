@@ -42,6 +42,11 @@ namespace maml::v1 {
         std::span<const uint8_t> bytes;
         uint64_t base = 0;
         std::map<uint64_t, uint64_t> pointer_map;
+        std::optional<uint64_t> mapped_pointer(uint64_t raw) const {
+            auto it = pointer_map.find(raw);
+            if (it == pointer_map.end() || !readable(it->second)) return std::nullopt;
+            return it->second;
+        }
         bool readable(uint64_t address) const {
             return address >= base && address - base < bytes.size();
         }
@@ -542,10 +547,9 @@ namespace maml::v1 {
                     }
                     uint64_t destination = target;
                     if (absolute) {
-                        auto found = image.pointer_map.find(target);
-                        if (found == image.pointer_map.end())
-                            break;
-                        destination = found->second;
+                        auto mapped = image.mapped_pointer(target);
+                        if (!mapped) break;
+                        destination = *mapped;
                     }
                     if (!image.readable(destination))
                         break;

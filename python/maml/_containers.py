@@ -149,12 +149,23 @@ def functions_from_pdata(raw, code, buf):
                 for entry, coverage in by_entry.items()], len(buf)))
 
 
-def flatten_pe(path):
-    """Return (RVA-indexed bytes, sections, code, rodata, functions).
+@dataclass(frozen=True)
+class PEImage:
+    data: bytes
+    sections: tuple
+    code: tuple
+    rodata: tuple
+    data_ranges: tuple
+    functions: tuple
+    base: int
+    source_base: int
+    pointer_map: dict
 
-    Functions contain one primary entry and all resolved coverage spans.
-    Missing .pdata yields no function metadata; leaf functions may be absent.
-    """
+
+def flatten_pe(path, *, base=0, pointer_map=None, loaded_base=None):
+    """Load a disk PE into named metadata; absolute pointers use its preferred base."""
+    if not isinstance(base, int) or not 0 <= base <= 0xffffffffffffffff:
+        raise ValueError("Invalid logical image base")
     try:
         import lief
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -172,6 +183,7 @@ def flatten_pe(path):
     ranges = []
     code = []
     rodata = []
+    data_ranges = []
     pdata_range = None
     for s in binary.sections:
         content = bytes(s.content)
@@ -183,6 +195,8 @@ def flatten_pe(path):
         r = Range(begin=va, end=r_end, name=s.name, executable=executable)
         ranges.append(r)
 
+        if not executable and s.has_characteristic(lief.PE.Section.CHARACTERISTICS.CNT_INITIALIZED_DATA):
+            data_ranges.append(r)
         writable = s.has_characteristic(
             lief.PE.Section.CHARACTERISTICS.MEM_WRITE)
         if executable:
@@ -206,4 +220,29 @@ def flatten_pe(path):
     if pdata_range is not None:
         pstart, pend = pdata_range
         functions = functions_from_pdata(bytes(buf[pstart:pend]), code, buf)
-    return bytes(buf), ranges, code, rodata, functions
+    if base + len(buf) > 0x10000000000000000:
+        raise ValueError("Logical image address overflow")
+    source_base = int(binary.optional_header.imagebase) if loaded_base is None else loaded_base
+    if isinstance(source_base, bool) or not isinstance(source_base, int) or not 0 <= source_base <= 0xffffffffffffffff:
+        raise ValueError("Invalid loaded image base")
+    import bisect
+    starts = sorted((r.begin, r.end) for r in ranges if r.begin < r.end)
+    lows = [lo for lo, hi in starts]
+    ends = []
+    for lo, hi in starts:
+        ends.append(max(hi, ends[-1] if ends else 0))
+    mappings = {}
+    for r in data_ranges:
+        for at in range(r.begin, r.end - 7):
+            raw_value = int.from_bytes(buf[at:at+8], 'little')
+            destination = raw_value - source_base
+            i = bisect.bisect_right(lows, destination) - 1
+            if i >= 0 and destination < ends[i]:
+                mappings[raw_value] = base + destination
+    for raw_value, destination in (pointer_map or {}).items():
+        if (not isinstance(raw_value, int) or not 0 <= raw_value <= 0xffffffffffffffff
+                or not isinstance(destination, int) or not base <= destination < base + len(buf)):
+            raise ValueError("Invalid explicit pointer mapping")
+        mappings[raw_value] = destination
+    return PEImage(bytes(buf), tuple(ranges), tuple(code), tuple(rodata),
+                   tuple(data_ranges), tuple(functions), base, source_base, mappings)

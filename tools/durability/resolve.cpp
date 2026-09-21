@@ -44,7 +44,7 @@ static Build load(const std::string& tag) {
     std::string k;
     uint64_t x = 0, y = 0;
     while (m >> k) {
-        if (k == "size") { m >> x; continue; }
+        if (k == "size" || k == "base") { m >> x; continue; }
         if (k == "function") {
             uint64_t entry;
             if (!(m >> entry >> x >> y)) throw std::runtime_error("Invalid function span record");
@@ -54,6 +54,7 @@ static Build load(const std::string& tag) {
             continue;
         }
         m >> x >> y;
+        if (k == "data" || k == "pointer") continue;
         if (k == "code") b.code.push_back({ x, y });
         else if (k == "rodata") b.rodata.push_back({ x, y });
         else throw std::runtime_error("Unknown manifest record: " + k);

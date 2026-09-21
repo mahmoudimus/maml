@@ -8,6 +8,9 @@ namespace maml::v1 {
         std::string stage;
         size_t into = 0;
         size_t out = 0;
+        bool pointer_stats = false;
+        std::vector<maml::generate::Range> searched_ranges;
+        size_t candidates = 0, mapped = 0, unmapped = 0, invalid = 0;
     };
     struct PipelineResult {
         bool is_matches = false;
@@ -23,6 +26,7 @@ namespace maml::v1 {
         struct Stage {
             std::string name, argument, modifier, string_match = "exact";
             uint64_t number = 0;
+            int64_t displacement = 0;
             std::optional<Pattern> pattern;
         };
         std::vector<Stage> stages_;
@@ -58,7 +62,7 @@ namespace maml::v1 {
                 s.name = std::string(source.substr(begin, p - begin));
                 const bool directional = s.name == "before" || s.name == "after";
                 const bool text = directional || s.name == "str" || s.name == "bytes" || s.name == "find" || s.name == "capture";
-                const bool numeric = s.name == "nth" || s.name == "limit" || s.name == "read";
+                const bool numeric = s.name == "nth" || s.name == "limit" || s.name == "read" || s.name == "offset";
                 if (text || numeric) {
                     need('(');
                     if (text) {
@@ -97,11 +101,12 @@ namespace maml::v1 {
                     } else {
                         ws();
                         size_t start = p;
+                        if (s.name == "offset" && p < source.size() && source[p] == '-') ++p;
                         while (p < source.size() && std::isdigit(static_cast<unsigned char>(source[p])))
                             ++p;
-                        auto r = std::from_chars(source.data() + start, source.data() + p, s.number);
+                        auto r = s.name == "offset" ? std::from_chars(source.data() + start, source.data() + p, s.displacement) : std::from_chars(source.data() + start, source.data() + p, s.number);
                         if (r.ec != std::errc{} || r.ptr != source.data() + p)
-                            throw Error("InvalidArgument", "Expected unsigned decimal integer", p);
+                            throw Error("InvalidArgument", "Expected in-range decimal integer", p);
                         if (s.name == "read" && s.number != 1 && s.number != 2 && s.number != 4 && s.number != 8)
                             throw Error("InvalidArgument", "read width must be 1, 2, 4, or 8", p);
                     }
@@ -142,7 +147,7 @@ namespace maml::v1 {
                             throw Error("InvalidArgument", "within must be an unsigned 64-bit integer", start);
                     }
                     need(')');
-                } else if (s.name != "xrefs" && s.name != "func" && s.name != "callers" && s.name != "unique")
+                } else if (s.name != "xrefs" && s.name != "func" && s.name != "callers" && s.name != "unique" && s.name != "ptrrefs" && s.name != "read_ptr")
                     throw Error("InvalidSyntax", "Unknown pipeline stage: " + s.name, p);
                 const size_t modifier_begin = p;
                 ws();
@@ -160,6 +165,8 @@ namespace maml::v1 {
                     if (p < source.size() && source[p] == ':')
                         throw Error("InvalidModifier", "Repeated func modifier", p);
                 }
+                if (matches && (s.name == "ptrrefs" || s.name == "offset" || s.name == "read_ptr"))
+                    throw Error("InvalidType", "Pointer traversal requires projected image addresses", begin);
                 const bool seed = s.name == "str" || s.name == "bytes";
                 if (seed != stages_.empty())
                     throw Error("InvalidSyntax", "A pipeline must start with exactly one source", begin);
@@ -189,7 +196,8 @@ namespace maml::v1 {
         PipelineResult run(const Image& image, std::span<const maml::generate::Range> code = {},
             std::span<const maml::generate::Range> rodata = {},
             std::span<const maml::generate::Function> functions = {},
-            std::span<const maml::generate::Range> instructions = {}) const {
+            std::span<const maml::generate::Range> instructions = {},
+            std::span<const maml::generate::Range> data = {}) const {
             std::map<uint64_t, uint64_t> instruction_ends;
             for (auto ins : instructions) {
                 if (ins.begin >= ins.end || ins.end > image.bytes.size())
@@ -219,6 +227,9 @@ namespace maml::v1 {
             };
             for (const auto& s : stages_) {
                 const size_t before = count();
+                Trace trace;
+                trace.stage = s.name + (s.modifier.empty() ? "" : ":" + s.modifier);
+                trace.into = before;
                 if (s.name == "unique") {
                     if (count() != 1)
                         throw Error("Cardinality", "unique requires exactly one element");
@@ -254,14 +265,89 @@ namespace maml::v1 {
                         for (const auto& m : r.matches)
                             inputs.push_back(m.offset);
                     } else {
-                        for (const auto& v : r.values)
+                        for (const auto& v : r.values) {
+                            if ((s.name == "ptrrefs" || s.name == "offset" || s.name == "read_ptr") &&
+                                (v.space != "image" || v.kind == "ReadValue" || v.kind == "AbsolutePointerValue"))
+                                throw Error("InvalidAddress", s.name + ": requires logical image addresses");
+                            if ((s.name == "ptrrefs" || s.name == "offset" || s.name == "read_ptr") && !image.readable(v.value))
+                                throw Error("InvalidAddress", s.name + ": input outside image at " + std::to_string(v.value));
                             inputs.push_back(offset(v));
+                        }
                     }
+                    const auto original_values = r.values;
                     r.matches.clear();
                     r.values.clear();
                     r.schema.clear();
                     r.is_matches = false;
-                    if (s.name == "str") {
+                    if (s.name == "offset" || s.name == "read_ptr" || s.name == "ptrrefs") {
+                        auto fail = [&](uint64_t at, const char* why) {
+                            throw Error("InvalidAddress", s.name + " at offset " + std::to_string(at) + ": " + why);
+                        };
+                        auto read64 = [&](uint64_t at) {
+                            uint64_t raw = 0;
+                            for (size_t k = 0; k < 8; ++k) raw |= uint64_t(image.bytes[size_t(at) + k]) << (8*k);
+                            return raw;
+                        };
+                        if (s.name == "offset") {
+                            for (auto v : original_values) {
+                                uint64_t dest;
+                                if (!image.readable(v.value) || !add_signed(v.value, s.displacement, dest) || !image.readable(dest))
+                                    fail(v.value, "address overflow or outside image");
+                                v.value = dest;
+                                r.values.push_back(v);
+                            }
+                        } else if (s.name == "read_ptr") {
+                            trace.pointer_stats = true;
+                            for (auto at : inputs) {
+                                if (at > image.bytes.size() || image.bytes.size() - at < 8) fail(at, "truncated pointer");
+                                ++trace.candidates;
+                                auto dest = image.mapped_pointer(read64(at));
+                                if (!dest) fail(at, "unmapped or invalid pointer destination");
+                                ++trace.mapped;
+                                r.values.push_back(Value{*dest, "MappedPointerAddress", "image"});
+                            }
+                        } else {
+                            trace.pointer_stats = true;
+                            std::vector<maml::generate::Range> ranges(data.begin(), data.end());
+                            ranges.insert(ranges.end(), rodata.begin(), rodata.end());
+                            for (auto r : ranges)
+                                if (r.begin > r.end || r.end > image.bytes.size()) fail(r.begin, "invalid data range");
+                            for (auto c : code) {
+                                if (c.begin > c.end || c.end > image.bytes.size()) fail(c.begin, "invalid code range");
+                                if (c.begin == c.end) continue;
+                                std::vector<maml::generate::Range> next;
+                                for (auto r : ranges) {
+                                    if (c.end <= r.begin || c.begin >= r.end) next.push_back(r);
+                                    else {
+                                        if (r.begin < c.begin) next.push_back({r.begin, c.begin});
+                                        if (c.end < r.end) next.push_back({c.end, r.end});
+                                    }
+                                }
+                                ranges = std::move(next);
+                            }
+                            std::sort(ranges.begin(), ranges.end(), [](auto a, auto b){return a.begin < b.begin;});
+                            for (auto r : ranges) {
+                                if (r.begin == r.end) continue;
+                                if (!trace.searched_ranges.empty() && r.begin < trace.searched_ranges.back().end)
+                                    trace.searched_ranges.back().end = std::max(r.end, trace.searched_ranges.back().end);
+                                else trace.searched_ranges.push_back(r);
+                            }
+                            if (trace.searched_ranges.empty()) throw Error("MissingMetadata", "ptrrefs requires non-code data ranges");
+                            std::unordered_set<uint64_t> wanted(inputs.begin(), inputs.end());
+                            if (!wanted.empty()) for (auto range : trace.searched_ranges) {
+                                for (uint64_t at = range.begin; range.end - at >= 8; ++at) {
+                                    ++trace.candidates;
+                                    auto raw = read64(at);
+                                    auto it = image.pointer_map.find(raw);
+                                    if (it == image.pointer_map.end()) { ++trace.unmapped; continue; }
+                                    auto dest = image.mapped_pointer(raw);
+                                    if (!dest) { ++trace.invalid; continue; }
+                                    ++trace.mapped;
+                                    if (wanted.count(*dest - image.base)) r.values.push_back(address(at));
+                                }
+                            }
+                        }
+                    } else if (s.name == "str") {
                         if (rodata.empty())
                             throw Error("MissingMetadata", "str requires rodata ranges");
                         for (const auto& str : maml::generate::strings(indexed)) {
@@ -384,7 +470,8 @@ namespace maml::v1 {
                     std::sort(r.values.begin(), r.values.end());
                     r.values.erase(std::unique(r.values.begin(), r.values.end()), r.values.end());
                 }
-                r.trace.push_back({ s.name + (s.modifier.empty() ? "" : ":" + s.modifier), before, count() });
+                trace.out = count();
+                r.trace.push_back(std::move(trace));
             }
             return r;
         }
@@ -455,6 +542,9 @@ namespace maml::v1 {
         PipelineBuilder xrefs() const {
             return append("xrefs");
         }
+        PipelineBuilder ptrrefs() const { return append("ptrrefs"); }
+        PipelineBuilder read_ptr() const { return append("read_ptr"); }
+        PipelineBuilder offset(int64_t n) const { return append("offset(" + std::to_string(n) + ")"); }
         PipelineBuilder callers() const {
             return append("callers");
         }

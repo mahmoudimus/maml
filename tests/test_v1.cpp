@@ -189,3 +189,28 @@ TEST_CASE("function spans preserve entries and exclude gaps", "[v1][pipeline]") 
     const std::array<generate::Function, 2> invalid{ { { 0, { { 0, 4 } } }, { 2, { { 2, 8 } } } } };
     REQUIRE_THROWS_AS(v1::Pipeline("bytes(\"AA\") -> func").run(image, {}, {}, invalid), v1::Error);
 }
+
+TEST_CASE("absolute pointer table traversal uses explicit address mappings", "[v1][pipeline][pointers]") {
+    using namespace maml;
+    std::vector<uint8_t> bytes(128, 0);
+    const std::string name = "PitchUpStart";
+    std::copy(name.begin(), name.end(), bytes.begin()+16);
+    auto store = [&](size_t at, uint64_t value) {
+        for (int k=0;k<8;++k) bytes[at+k] = uint8_t(value >> (8*k));
+    };
+    constexpr uint64_t base = 0x140000000;
+    store(48,base+16); store(56,base+96);
+    v1::Image image{bytes,base,{{base+16,base+16},{base+96,base+96}}};
+    std::array<generate::Range,1> rodata{{{16,32}}}, data{{{48,64}}};
+    std::array<generate::Function,1> functions{{{96,{{96,112}}}}};
+    auto query = v1::PipelineBuilder().str(name).ptrrefs().unique().offset(8).read_ptr().func(v1::FunctionMode::Strict).unique().build();
+    auto result = query.run(image,{},rodata,functions,{},data);
+    REQUIRE(result.values.size()==1);
+    REQUIRE(result.values[0].value==base+96);
+    REQUIRE(result.trace[1].candidates==18);
+    REQUIRE(result.trace[1].mapped==2);
+    REQUIRE(result.trace[1].out==1);
+    image.pointer_map.erase(base+96);
+    REQUIRE_THROWS_AS(query.run(image,{},rodata,functions,{},data), v1::Error);
+    REQUIRE_THROWS_AS(v1::Pipeline("str(\"PitchUpStart\") -> offset(-17)").run(image,{},rodata), v1::Error);
+}

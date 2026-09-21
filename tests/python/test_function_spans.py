@@ -109,7 +109,7 @@ def test_from_pe_populates_full_metadata_and_preserves_flatten_tuple(tmp_path):
     raw=b''.join(struct.pack('<III',*r) for r in [parent,(0x1030,0x1040,0x2008)])
     binary.sections[2].content=list(raw)+[0]*(512-len(raw))
     builder=lief.PE.Builder(binary,lief.PE.Builder.config_t()); builder.build(); builder.write(str(path))
-    assert len(flatten_pe(path)) == 5
+    assert flatten_pe(path).functions[0].entry == 0x1008
     image=v1.Image.from_pe(path)
     assert image.functions[0].spans == ((0x1008,0x1010),(0x1030,0x1040))
     assert not hasattr(image, "funcs")

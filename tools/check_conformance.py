@@ -9,9 +9,9 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-KINDS = {"CursorAddress", "ResolvedRelativeTarget", "AbsolutePointerValue"}
-OPERATIONS = {"compile", "match_at", "project", "lookup", "unique_matches"}
-STATUSES = {"ok", "no_match", "compile_error", "schema_error", "cardinality_error"}
+KINDS = {"CursorAddress", "ResolvedRelativeTarget", "AbsolutePointerValue", "MappedPointerAddress", "ReadValue"}
+OPERATIONS = {"compile", "match_at", "project", "lookup", "unique_matches", "pipeline"}
+STATUSES = {"ok", "no_match", "compile_error", "schema_error", "cardinality_error", "execution_error"}
 
 
 class ConformanceError(ValueError):
@@ -59,6 +59,7 @@ def validate_request(request):
     op = request.get("operation")
     require(op in OPERATIONS, "unknown operation")
     fields = {
+        "pipeline": {"pipeline", "image"},
         "compile": {"pattern"},
         "match_at": {"pattern", "image", "start_offset"},
         "project": {"name", "schema", "matches", "unique"},
@@ -66,6 +67,25 @@ def validate_request(request):
         "unique_matches": {"matches"},
     }
     require(set(request) == fields[op] | {"dialect", "operation"}, "incorrect request fields")
+    if op == "pipeline":
+        require(isinstance(request['pipeline'], str), 'pipeline must be text')
+        image = request['image']
+        require(isinstance(image, dict) and set(image) == {'bytes','base','pointer_map','code','rodata','data','functions'}, 'invalid pipeline image')
+        validate_request({'dialect':'maml-v1','operation':'match_at','pattern':'','start_offset':'0x0',
+                          'image':{k:image[k] for k in ('bytes','base','pointer_map')}})
+        for kind in ('code','rodata','data'):
+            require(isinstance(image[kind],list), 'ranges must be lists')
+            for span in image[kind]:
+                require(isinstance(span,list) and len(span)==2, 'invalid range')
+                require(integer(span[0]) <= integer(span[1]), 'reversed range')
+        require(isinstance(image['functions'],list), 'functions must be a list')
+        for fn in image['functions']:
+            require(isinstance(fn,dict) and set(fn)=={'entry','spans'}, 'invalid function')
+            integer(fn['entry'])
+            require(isinstance(fn['spans'],list), 'spans must be a list')
+            for span in fn['spans']:
+                require(isinstance(span,list) and len(span)==2, 'invalid span')
+                require(integer(span[0]) < integer(span[1]), 'invalid span bounds')
     if op in {"compile", "match_at"}:
         require(isinstance(request["pattern"], str), "pattern must be text")
     if op == "match_at":
@@ -105,6 +125,19 @@ def validate_result(result, operation):
     require(isinstance(result, dict) and isinstance(result.get("status"), str), "invalid result")
     status = result["status"]
     require(status in STATUSES, "unknown result status")
+    if operation == "pipeline":
+        if status in {'compile_error','schema_error','execution_error'}:
+            require(set(result)=={'status','code'} and isinstance(result['code'],str), 'invalid pipeline error')
+        elif status == 'cardinality_error':
+            require(set(result)=={'status'}, 'invalid cardinality result')
+        else:
+            require(status=='ok', 'invalid pipeline status')
+            require(set(result) in ({'status','values'},{'status','matches'}), 'invalid pipeline result')
+            field = 'values' if 'values' in result else 'matches'
+            require(isinstance(result[field],list), 'result must be a list')
+            for value in result[field]:
+                (capture if field=='values' else match_record)(value)
+        return
     if status in {"compile_error", "schema_error"}:
         require(set(result) == {"status", "code"} and isinstance(result["code"], str), "invalid error result")
         require(operation in ({"compile", "match_at"} if status == "compile_error" else {"lookup", "project"}),

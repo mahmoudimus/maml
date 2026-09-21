@@ -32,14 +32,14 @@ cdef extern from *:
     }
     static maml::v1::PipelineResult maml_v1_pipeline_run(const maml::v1::Pipeline& pipeline,
             const maml::v1::Image& image, const std::vector<maml::generate::Range>& code,
-            const std::vector<maml::generate::Range>& rodata, const std::vector<maml::generate::Function>& functions, const std::vector<maml::generate::Range>& instructions) {
-        return pipeline.run(image,code,rodata,functions,instructions);
+            const std::vector<maml::generate::Range>& rodata, const std::vector<maml::generate::Function>& functions, const std::vector<maml::generate::Range>& instructions, const std::vector<maml::generate::Range>& data) {
+        return pipeline.run(image,code,rodata,functions,instructions,data);
     }
     """
     void maml_v1_error()
     CImage maml_v1_image(const uint8_t*, size_t, uint64_t, const map[uint64_t,uint64_t]&) except +maml_v1_error nogil
     vector[CMatch] maml_v1_match_at(const CPattern&, const CImage&, uint64_t) except +maml_v1_error nogil
-    CResult maml_v1_pipeline_run(const CPipeline&, const CImage&, const vector[CRange]&, const vector[CRange]&, const vector[GenFunction_t]&, const vector[CRange]&) except +maml_v1_error nogil
+    CResult maml_v1_pipeline_run(const CPipeline&, const CImage&, const vector[CRange]&, const vector[CRange]&, const vector[GenFunction_t]&, const vector[CRange]&, const vector[CRange]&) except +maml_v1_error nogil
 
 cdef extern from "maml/v1_pipeline.hpp" namespace "maml::v1" nogil:
     cdef cppclass CValue "maml::v1::Value":
@@ -63,6 +63,12 @@ cdef extern from "maml/v1_pipeline.hpp" namespace "maml::v1" nogil:
         string stage
         size_t into
         size_t out
+        cbool pointer_stats
+        vector[GenRange_t] searched_ranges
+        size_t candidates
+        size_t mapped
+        size_t unmapped
+        size_t invalid
     cdef cppclass CResult "maml::v1::PipelineResult":
         CResult()
         cbool is_matches
@@ -124,15 +130,19 @@ cdef class NativePipeline:
         self.ptr=new CPipeline(text.encode())
     def __dealloc__(self):
         del self.ptr
-    def run(self, bytes data, uint64_t base, mapping, code, rodata, functions, instructions):
+    def run(self, bytes data, uint64_t base, mapping, code, rodata, functions, instructions, data_ranges):
         cdef map[uint64_t,uint64_t] mapper=mapping
         cdef const uint8_t* buf=data
         cdef CImage image=maml_v1_image(buf,len(data),base,mapper)
-        cdef vector[CRange] c=ranges(code), r=ranges(rodata), ins=ranges(instructions)
+        cdef vector[CRange] c=ranges(code), r=ranges(rodata), ins=ranges(instructions), d=ranges(data_ranges)
         cdef vector[GenFunction_t] fn = _functions_to_vec(functions)
         cdef CResult result
         with nogil:
-            result=maml_v1_pipeline_run(self.ptr[0],image,c,r,fn,ins)
+            result=maml_v1_pipeline_run(self.ptr[0],image,c,r,fn,ins,d)
         return (result.is_matches, tuple(s.decode() for s in result.schema),
                 matches(result.matches), [value(v) for v in result.values],
-                [(t.stage.decode(),t.into,t.out) for t in result.trace])
+                [(t.stage.decode(),t.into,t.out,
+                  {"searched_ranges": [(span.begin,span.end) for span in t.searched_ranges],
+                   "candidates": t.candidates, "mapped": t.mapped, "unmapped": t.unmapped,
+                   "invalid": t.invalid, "output": t.out} if t.pointer_stats else None)
+                 for t in result.trace])

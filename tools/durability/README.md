@@ -27,3 +27,7 @@ The Python flattener requires the installed MAML package with its PE extra. It
 uses the shared PE loader and writes `function ENTRY BEGIN END` span records.
 Measurement and resolution sample function entries once, including entries with
 multiple spans. Fragments never become independent sample targets.
+
+The named PE loader also emits `data`, `base`, and `pointer` manifest records
+for absolute-pointer traversal with `mamlpipe`. Generation measurement and
+resolution continue using RVAs and ignore those traversal-only records.

@@ -140,3 +140,37 @@ The rebuilt macOS arm64 wheel passed the installed-package smoke test outside
 the checkout, including the split-function pipeline and NEON backend check.
 These are synthetic layout and packaged execution tests, not a live test of
 `GetEffectivePosition`, `wow_call_spoof`, or the supplied game's calling ABI.
+
+
+## Absolute-pointer table traversal
+
+Implemented `ptrrefs`, signed `offset(N)`, and `read_ptr` in the shared pipeline
+executor and both typed builders. Python/Cython, C++, CLI manifests/trace,
+PE loading, durability export, and JSONL conformance use the same explicit
+pointer mapping semantics. `flatten_pe` now returns named `PEImage` metadata;
+the five-item loader interface described above is superseded.
+
+Validation: 285 Python tests, 132 C++ cases (811 assertions), and all 65
+conformance vectors passed on macOS arm64. A rebuilt wheel installed into an
+isolated environment passed scanning, split-function ownership, pointer-table
+traversal, pointer trace, and NEON checks. Windows/Linux CI has not been run for
+this change. The original 60 conformance vectors remain unchanged.
+
+Real-image acceptance used `WowB-1.60.1.69893-devirt.exe` from build
+1.60.1.69893, SHA-256 `d805f9302657ab15b51157fcbfa845447f62aabf32aa12bf0866148e1a1bf18d`. The disk PE preferred/source base
+was `0x7ff722da0000` and the logical output base was zero. Mappings
+were derived from full-width pointer slots in initialized non-code sections to
+mapped section addresses; no base guessing or pointer truncation was used.
+
+| String | Verified record RVA | Verified callback RVA |
+| --- | ---: | ---: |
+| `PitchUpStart` | `0x5727720` | `0x2232530` |
+| `PitchUpStop` | `0x5727730` | `0x22328d0` |
+| `PitchDownStart` | `0x5727740` | `0x2232c60` |
+| `PitchDownStop` | `0x5727750` | `0x2233000` |
+
+Each string produced one matching pointer slot, and `func:strict` accepted the
+selected callback. Both the Python API and `mamlpipe` using exported manifests
+returned the expected results. Each `ptrrefs` run inspected 63,885,984 complete
+slots, mapped 283,244, and emitted one matching storage address. The tests locate
+addresses; they do not invoke callbacks or rename an analysis database.

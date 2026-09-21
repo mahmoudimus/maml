@@ -27,6 +27,18 @@ def execute(request):
         raise ValueError('Unsupported dialect')
     try:
         op = request['operation']
+        if op == 'pipeline':
+            raw = request['image']
+            def ranges(name):
+                return [(int(lo,16),int(hi,16)) for lo,hi in raw[name]]
+            image = v1.Image(bytes.fromhex(raw['bytes']), base=int(raw['base'],16),
+                pointer_map={int(m['value'],16):int(m['address'],16) for m in raw['pointer_map']},
+                code=ranges('code'), rodata=ranges('rodata'), data_ranges=ranges('data'),
+                functions=[v1.Function(int(f['entry'],16),[(int(lo,16),int(hi,16)) for lo,hi in f['spans']]) for f in raw['functions']])
+            result = v1.Pipeline(request['pipeline']).run(image)
+            if result.kind == 'matches':
+                return {'status':'ok','matches':[_encode_match(m) for m in result.matches]}
+            return {'status':'ok','values':[_encode(v) for v in result.values]}
         if op in {'compile','match_at'}:
             pattern = v1.Pattern(request['pattern'])
             schema = list(pattern.schema)
@@ -51,6 +63,8 @@ def execute(request):
             match = v1.unique_matches([_match(m,tuple(m['captures'])) for m in request['matches']])
             return {'status':'ok','match':_encode_match(match)}
         raise ValueError('Unknown operation: '+op)
+    except v1.ExecutionError as exc:
+        return {'status':'execution_error','code':exc.code}
     except v1.SchemaError as exc:
         return {'status':'schema_error','code':exc.code}
     except v1.CompileError as exc:

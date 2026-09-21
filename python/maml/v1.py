@@ -40,7 +40,7 @@ def _native(call, *args, **kwargs):
             raise SchemaError(code, message, position) from exc
         if code == 'Cardinality':
             raise CardinalityError(message) from exc
-        if code in {'MissingMetadata', 'ResourceLimit', 'NotFunctionEntry'}:
+        if code in {'MissingMetadata', 'ResourceLimit', 'NotFunctionEntry', 'InvalidAddress'}:
             raise ExecutionError(code, message, position) from exc
         raise CompileError(code, message, position) from exc
 
@@ -100,7 +100,7 @@ def _matches(raw, schema):
 
 class Image:
     """Immutable byte snapshot with logical base, explicit pointer map, and RVA ranges."""
-    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), functions=(), instructions=()):
+    def __init__(self, data, *, base=0, pointer_map=None, code=(), rodata=(), functions=(), instructions=(), data_ranges=()):
         self.data = bytes(data)
         self.base = _u64(base)
         self.pointer_map = {_u64(k):_u64(v) for k,v in (pointer_map or {}).items()}
@@ -114,6 +114,7 @@ class Image:
                 result.append((begin,end))
             return tuple(result)
         self.code, self.rodata = ranges(code), ranges(rodata)
+        self.data_ranges = ranges(data_ranges)
         self.instructions = ranges(instructions)
         self.functions = validate_functions(functions, len(self.data))
 
@@ -125,8 +126,10 @@ class Image:
     @classmethod
     def from_pe(cls, path, **kwargs):
         from ._containers import flatten_pe
-        data, sections, code, rodata, functions = flatten_pe(path)
-        return cls(data, code=code, rodata=rodata, functions=functions, **kwargs)
+        loaded = flatten_pe(path, base=kwargs.pop('base', 0), pointer_map=kwargs.pop('pointer_map', None), loaded_base=kwargs.pop('loaded_base', None))
+        return cls(loaded.data, base=loaded.base, pointer_map=loaded.pointer_map,
+                   code=loaded.code, rodata=loaded.rodata, functions=loaded.functions,
+                   data_ranges=loaded.data_ranges, **kwargs)
 
 
 class Pattern:
@@ -160,6 +163,7 @@ class StageResult:
     stage: str
     into: int
     out: int
+    pointer_stats: object
 
 
 @dataclass(frozen=True)
@@ -183,7 +187,7 @@ class Pipeline:
     def run(self, image):
         is_matches,schema,raw,values,trace = _native(
             self._native.run, image.data, image.base, image.pointer_map,
-            image.code, image.rodata, image.functions, image.instructions)
+            image.code, image.rodata, image.functions, image.instructions, image.data_ranges)
         return PipelineResult('matches' if is_matches else 'values',schema,
                               tuple(_matches(raw,schema)),tuple(CaptureValue(*v) for v in values),
                               tuple(StageResult(*t) for t in trace))
@@ -264,6 +268,17 @@ class PipelineBuilder:
 
     def limit(self, count):
         return self._append(f'limit({_u64(count)})')
+
+    def ptrrefs(self):
+        return self._append('ptrrefs')
+
+    def read_ptr(self):
+        return self._append('read_ptr')
+
+    def offset(self, displacement):
+        if isinstance(displacement, bool) or not isinstance(displacement, int) or not -(1 << 63) <= displacement < (1 << 63):
+            raise ValueError('offset requires a signed 64-bit integer')
+        return self._append(f'offset({displacement})')
 
     def read(self, width):
         return self._append(f'read({_u64(width)})')

@@ -19,20 +19,26 @@ BUILDS = {
 
 
 def write_build(path, tag, out):
-    buf, sections, code, rodata, functions = flatten_pe(path)
+    loaded = flatten_pe(path)
+    buf, code, rodata, functions = loaded.data, loaded.code, loaded.rodata, loaded.functions
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{tag}.img").write_bytes(buf)
-    man = {"tag": tag, "size": len(buf),
+    man = {"tag": tag, "size": len(buf), "base": loaded.base, "source_base": loaded.source_base,
+           "data": [[r.begin, r.end] for r in loaded.data_ranges],
+           "pointer_map": loaded.pointer_map,
            "code": [[r.begin, r.end] for r in code],
            "rodata": [[r.begin, r.end] for r in rodata],
            "functions": [{"entry": f.entry, "spans": f.spans} for f in functions]}
     (out / f"{tag}.json").write_text(json.dumps(man))
     with open(out / f"{tag}.txt", "w") as f:
         f.write(f"size {len(buf)}\n")
-        for kind in ("code", "rodata"):
+        for kind in ("code", "rodata", "data"):
             for lo, hi in man[kind]:
                 f.write(f"{kind} {lo} {hi}\n")
+        f.write(f"base {loaded.base}\n")
+        for raw, address in loaded.pointer_map.items():
+            f.write(f"pointer {raw} {address}\n")
         for fn in functions:
             for lo, hi in fn.spans:
                 f.write(f"function {fn.entry} {lo} {hi}\n")

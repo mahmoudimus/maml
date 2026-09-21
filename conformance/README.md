@@ -6,7 +6,7 @@ on a particular matcher, language, object layout, exception class, or build
 system. Rust, C++, Python, JavaScript, and other implementations can consume the
 same file or expose the adapter protocol below.
 
-**Status:** all 60 supplied vectors pass against the C++ semantic frontend
+**Status:** all 65 supplied vectors pass against the C++ semantic frontend
 through its Cython bindings and the `maml.v1_adapter` JSONL adapter. This checks
 the listed contracts, not complete language coverage or performance. The
 unversioned parser remains a separate dialect.
@@ -152,3 +152,22 @@ Additional vectors should specify all inputs and expected outputs, retain exact
 64-bit values, and avoid depending on unsettled language choices. A semantic
 change requires an explicit dialect/version decision rather than quietly
 rewriting expected results to make an implementation pass.
+
+
+## Pipeline pointer traversal extension
+
+The `pipeline` operation takes `pipeline` text and an `image` with `bytes`,
+`base`, `pointer_map`, `code`, `rodata`, `data`, and `functions`. Addresses use
+canonical unsigned hexadecimal strings. Ranges are `[begin,end]` pairs;
+functions are `{entry, spans}` objects. Pointer mappings retain the existing
+`{value,address}` representation. `data` means pointer scan ranges, not bytes.
+
+Successful pipeline responses contain `status: "ok"` and either `values` or
+`matches`, using the existing value/match encoding. Empty lists represent a
+normal miss. `MappedPointerAddress` is an image-space value kind. Runtime
+pointer errors return `{status: "execution_error", code: "InvalidAddress"}`;
+compile/schema/cardinality errors retain their established response shapes.
+Five new vectors cover full table traversal, mapped output kind, negative
+offsets, out-of-image offsets, and unmapped dereferences. Existing matcher and
+projection vectors are unchanged. Trace counters are tested through native,
+Python, and CLI regression tests rather than the JSONL result protocol.

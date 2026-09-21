@@ -90,6 +90,9 @@ cdef class Image:
         self.code = []
         self.rodata = []
         self.functions = []
+        self.data_ranges = []
+        self.pointer_map = {}
+        self.source_base = 0
 
     def __init__(self, *args, **kwargs):
         raise TypeError(
@@ -131,12 +134,15 @@ cdef class Image:
         `.pdata` when present -- see _containers.flatten_pe.
         """
         from maml._containers import flatten_pe
-        data, ranges, code, rodata, functions = flatten_pe(path)
-        img = Image.from_bytes(data)
-        img.sections = ranges
-        img.code = code
-        img.rodata = rodata
-        img.functions = functions
+        loaded = flatten_pe(path)
+        img = Image.from_bytes(loaded.data)
+        img.sections = list(loaded.sections)
+        img.code = list(loaded.code)
+        img.rodata = list(loaded.rodata)
+        img.functions = list(loaded.functions)
+        img.data_ranges = list(loaded.data_ranges)
+        img.pointer_map = loaded.pointer_map
+        img.source_base = loaded.source_base
         return img
 
     def to_va(self, rva):

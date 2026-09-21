@@ -85,6 +85,20 @@ def main(argv=None) -> int:
         return fail("split-function ownership did not survive the installed binding")
     print("  functions:    noncontiguous coverage passed")
 
+    import struct
+    raw = bytearray(128)
+    raw[16:29] = b"PitchUpStart\0"
+    struct.pack_into('<QQ', raw, 48, 0x140000010, 0x140000060)
+    table = maml.Image(raw, base=0x140000000,
+        pointer_map={0x140000010:0x140000010, 0x140000060:0x140000060},
+        rodata=[(16,32)], data_ranges=[(48,64)],
+        functions=[maml.Function(96, [(96,112)])])
+    resolved = maml.Pipeline('str("PitchUpStart") -> ptrrefs -> unique -> offset(8) -> read_ptr -> func:strict -> unique').run(table)
+    if [v.value for v in resolved.values] != [0x140000060]:
+        return fail("pointer-table traversal failed through installed bindings")
+    if resolved.trace[1].pointer_stats['mapped'] != 2:
+        return fail("pointer traversal trace did not survive installed bindings")
+    print("  pointers:     table traversal and trace passed")
     print("wheel OK")
     return 0
 

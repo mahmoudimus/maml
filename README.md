@@ -78,7 +78,7 @@ immutable dictionary of present captures. `capture(name)` returns a
 `CaptureValue(value, kind, space)` or `None` for a declared absent capture;
 unknown names raise `SchemaError`.
 
-`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), functions=(), instructions=())` takes an
+`v1.Image(data, base=0, pointer_map={}, code=(), rodata=(), functions=(), instructions=(), data_ranges=())` takes an
 immutable byte snapshot. Ranges are half-open buffer offsets, supplied as
 `(begin, end)` pairs or `maml.Range` objects. Captured cursor and relative
 addresses include `base`; match offsets do not. `pointer_map` explicitly maps
@@ -125,6 +125,9 @@ be shared between threads.
 | `func:loose` | Explicit alias for `func` |
 | `func:strict` | Requires every input to already be a known function entry |
 | `callers` | Direct call sites; requires code |
+| `ptrrefs` | Absolute-pointer storage addresses in supplied non-code data ranges |
+| `offset(N)` | Checked signed displacement of image-address values |
+| `read_ptr` | Read and explicitly map a little-endian 64-bit pointer |
 | `unique` | Exactly one current record or value; otherwise an error |
 | `nth(N)` | Zero-based selection; out-of-range yields no results |
 | `limit(N)` | First N results |
@@ -214,10 +217,11 @@ detection rather than a fixed hop limit; malformed links never promote a
 fragment to a callable entry. This metadata does not enumerate PE leaf functions
 that have no `.pdata` records.
 
-`flatten_pe(path)` returns exactly five items: `(data, sections, code, rodata,
-functions)`. The former range-only input and optional loader result shapes are
-removed. Rebuild native C++/Cython consumers and migrate callers to
-`Function(entry, spans)`; a contiguous function has one span.
+`flatten_pe(path)` now returns a named `PEImage` metadata object instead of a
+positional tuple. Use `.data`, `.sections`, `.code`, `.rodata`, `.data_ranges`,
+`.functions`, `.base`, `.source_base`, and `.pointer_map`. `Image.from_pe()`
+consumes these fields automatically. Rebuild native C++/Cython consumers;
+a contiguous `Function(entry, spans)` has one span.
 
 CLI manifests use repeated decimal `function ENTRY BEGIN END` records:
 
@@ -232,6 +236,75 @@ These describe two spans owned by entry 256 and one separate function at 384.
 `func BEGIN END` format is rejected. The durability flattener uses the shared PE
 loader and emits the same full span records; measurement and resolution sample
 each entry once.
+
+### Absolute-pointer table traversal
+
+Use explicit slot traversal for `{const char* name; void* callback;}` tables:
+
+```text
+str("PitchUpStart")
+    -> ptrrefs
+    -> unique
+    -> offset(8)
+    -> read_ptr
+    -> func:strict
+    -> unique
+```
+
+`ptrrefs` scans complete little-endian 64-bit slots at every byte offset in the
+union of `data_ranges` and `rodata`, excluding code coverage. Overlapping ranges
+are normalized; reads do not cross adjacent range boundaries. It compares
+explicitly mapped pointer destinations to the input address set and returns
+sorted, distinct storage addresses. Missing eligible data metadata is an error;
+unmapped candidates are skipped. It never changes `xrefs` or `callers`.
+
+`offset(N)` accepts a signed int64 decimal displacement (optional `-`), preserves
+address kind/space, and rejects arithmetic overflow or results outside the image.
+`read_ptr` reads eight bytes, maps the full uint64 value, and returns an image-space
+`MappedPointerAddress`. Truncated selected slots and unmapped/out-of-image
+pointers raise `InvalidAddress`; they are never silently discarded. `read(8)`
+still returns a scalar. These stages require image-address values; project match
+captures explicitly before using them. Outputs are sorted and deduplicated.
+
+```text
+pointer_stage := "ptrrefs" | "read_ptr" | "offset" "(" signed_int64 ")"
+```
+
+```python
+query = (v1.PipelineBuilder().str("PitchUpStart").ptrrefs().unique()
+         .offset(8).read_ptr().func(strict=True).unique().build())
+image = v1.Image.from_pe(path)  # maps stored VAs to logical addresses, base=0
+result = query.run(image)
+```
+
+```cpp
+auto query = maml::v1::PipelineBuilder().str("PitchUpStart").ptrrefs().unique()
+    .offset(8).read_ptr().func(maml::v1::FunctionMode::Strict).unique().build();
+auto result = query.run(image, code, rodata, functions, instructions, data_ranges);
+```
+
+All results include the logical image base. With base `0x140000000`, callback
+RVA `0x300` is returned as `0x140000300`. Flat-image callers supply `pointer_map`
+explicitly; even identity mappings are explicit. A PE loader constructs mappings
+from pointer slots in initialized non-code sections to mapped section addresses,
+using the file's preferred image base. `loaded_base=N` explicitly selects the
+source base for a relocated PE dump; `base=N` independently selects the logical
+output base. Custom `pointer_map` entries override derived mappings, and invalid
+custom destinations are rejected. Section padding outside mapped sections is
+not inferred to be a valid destination. Only 64-bit little-endian pointers are
+supported by these stages.
+
+CLI manifests add decimal `data BEGIN END`, `base N`, and
+`pointer RAW_VALUE LOGICAL_ADDRESS` records. Omitted `base` means zero; conflicting
+base or pointer records are errors. The durability flattener emits these fields.
+
+C++ `Trace` includes `pointer_stats`, `searched_ranges`, `candidates`, `mapped`,
+`unmapped`, and `invalid`; `out` remains the output count. Python `StageResult`
+has a required fourth field, `pointer_stats`: `None` for ordinary stages or a
+dictionary containing those counts, searched buffer ranges, and `output`.
+`mamlpipe --trace` prints the same statistics. A candidate is a complete scan
+slot, not necessarily a plausible or matching pointer. `unique` before
+`read_ptr` checks record identity; after dereference, equal callbacks deduplicate.
 
 ### String matching modes
 
@@ -829,6 +902,10 @@ The [code-reference proposal](docs/xrefs-proposal.md) describes the extension of
 to include address-taking LEAs for code targets while keeping `callers` limited
 to direct calls. It covers callback registration, compatibility, and acceptance
 cases without introducing a modifier.
+
+The [pointer-table traversal design](docs/pointer-table-traversal.md) records the
+implemented contract for adjacent name/callback slots, explicit address mapping,
+data ranges, and acceptance cases.
 
 The current strategies are `Body`, `Xref` (direct calls), `StringAnchor`
 (including a nearby call anchor), and `RipRef`. Cross-build verification can

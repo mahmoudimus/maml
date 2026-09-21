@@ -49,7 +49,10 @@ namespace {
     struct Manifest {
         bool ok = false;
         uint64_t size = 0; // 0 = the manifest did not say
-        std::vector<generate::Range> code, rodata, instructions;
+        std::vector<generate::Range> code, rodata, instructions, data;
+        uint64_t base = 0;
+        bool has_base = false;
+        std::map<uint64_t,uint64_t> pointers;
         std::vector<generate::Function> functions;
         std::string error;
     };
@@ -76,6 +79,14 @@ namespace {
             const std::string k(kind);
             if (got == 2 && k == "size") {
                 m.size = a;
+            } else if (got == 2 && k == "base") {
+                if (m.has_base && m.base != a) { m.error = "Conflicting base records"; return m; }
+                m.has_base = true; m.base = a;
+            } else if (got == 3 && k == "pointer") {
+                auto [it, inserted] = m.pointers.emplace(a,b);
+                if (!inserted && it->second != b) { m.error = "Conflicting pointer mappings"; return m; }
+            } else if (got == 3 && k == "data") {
+                m.data.push_back({a,b});
             } else if (got == 3 && k == "code") {
                 m.code.push_back({ a, b });
             } else if (got == 3 && k == "rodata") {
@@ -137,8 +148,8 @@ namespace {
             "stages: str(\"text\") | bytes(\"pattern\") | find(\"pattern\")\n"
             "        | before(\"pattern\", within=N) | after(\"pattern\", within=N)\n"
             "        | capture(\"name\") | xrefs | callers | func | func:strict | func:loose\n"
-            "        | unique | nth(N) | limit(N) | read(N),  composed with ->\n"
-            "manifest lines: size N | code A B | rodata A B | instruction A B | function ENTRY A B\n");
+            "        | ptrrefs | offset(N) | read_ptr | unique | nth(N) | limit(N) | read(N),  composed with ->\n"
+            "manifest lines: size N | code A B | rodata A B | instruction A B | function ENTRY A B | data A B | base N | pointer RAW LOGICAL\n");
     }
 
 } // namespace
@@ -212,7 +223,7 @@ int main(int argc, char** argv) {
 
     auto execute = [&](const std::string& text, const std::string& name) {
         try {
-            const auto result = v1::Pipeline(text).run(v1::Image{ bytes }, img.code, img.rodata, img.functions, m.instructions);
+            const auto result = v1::Pipeline(text).run(v1::Image{ bytes, m.base, m.pointers }, img.code, img.rodata, img.functions, m.instructions, m.data);
             if (!name.empty())
                 printf("%s\t", name.c_str());
             printf("%s %s=%zu", result.ok() ? "OK" : "NONE", result.is_matches ? "matches" : "values",
@@ -226,8 +237,13 @@ int main(int argc, char** argv) {
                 printf(" %llx:%s:%s", (unsigned long long)value.value, value.kind.c_str(), value.space.c_str());
             printf("\n");
             if (trace)
-                for (const auto& t : result.trace)
+                for (const auto& t : result.trace) {
                     fprintf(stderr, "%s %zu -> %zu\n", t.stage.c_str(), t.into, t.out);
+                    if (t.pointer_stats) {
+                        fprintf(stderr, "  candidates=%zu mapped=%zu unmapped=%zu invalid=%zu output=%zu\n", t.candidates,t.mapped,t.unmapped,t.invalid,t.out);
+                        for (auto r : t.searched_ranges) fprintf(stderr, "  range=%llu..%llu\n", (unsigned long long)r.begin, (unsigned long long)r.end);
+                    }
+                }
             return result.ok();
         } catch (const std::exception& e) {
             printf("%s%sERR %s\n", name.c_str(), name.empty() ? "" : "\t", e.what());
