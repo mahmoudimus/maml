@@ -6,7 +6,7 @@ on a particular matcher, language, object layout, exception class, or build
 system. Rust, C++, Python, JavaScript, and other implementations can consume the
 same file or expose the adapter protocol below.
 
-**Status:** all 65 supplied vectors pass against the C++ semantic frontend
+**Status:** all 81 supplied vectors pass against the decoder-enabled C++ semantic frontend
 through its Cython bindings and the `maml.v1_adapter` JSONL adapter. This checks
 the listed contracts, not complete language coverage or performance. The
 unversioned parser remains a separate dialect.
@@ -53,7 +53,7 @@ stderr rather than adding fields to the normalized result.
 
 ## Values and address model
 
-All addresses, offsets, and captured values are canonical unsigned 64-bit hex
+Addresses, offsets, and non-displacement values are canonical unsigned 64-bit hex
 strings: `0x0`, `0x8`, `0xffffffffffffffff`. Lowercase digits, no leading zeroes,
 and no JSON numbers. This preserves exactness in languages whose JSON numbers
 use floating point. Patterns express `target_add` as signed decimal text.
@@ -76,7 +76,7 @@ A capture is:
 {"value":"0x140000010","kind":"AbsolutePointerValue","space":"absolute"}
 ```
 
-Kinds are `CursorAddress`, `ResolvedRelativeTarget`, and `AbsolutePointerValue`.
+Byte patterns produce `CursorAddress`, `ResolvedRelativeTarget`, and `AbsolutePointerValue`.
 Matching uses `image` for cursor/relative addresses and `absolute` for decoded
 pointers. Record-only pipeline fixtures may supply another space identifier
 to check that equal bits in different spaces remain distinct.
@@ -171,3 +171,20 @@ Five new vectors cover full table traversal, mapped output kind, negative
 offsets, out-of-image offsets, and unmapped dereferences. Existing matcher and
 projection vectors are unchanged. Trace counters are tested through native,
 Python, and CLI regression tests rather than the JSONL result protocol.
+
+## Instruction operand extension
+
+Pipeline images may additionally provide `instructions`, a list of half-open
+image-offset ranges. Omitting it preserves existing byte-stage behavior. The
+`insn` stage defaults to metadata decoding: only supplied starts are decoded;
+length mismatches, overlaps, and starts inside another instruction are errors.
+Explicit `decode="linear"` needs no boundary list and stops on decode failure.
+
+The instruction spec and its field-oriented defaults are defined in the README.
+`disp(name)` is a signed int64 scalar of kind `DisplacementValue`, serialized as
+canonical signed hex (`-0x8`, `0x0`, `0x20`); other values retain unsigned hex.
+`disp_addr(name)` captures encoded-byte image addresses. Sixteen instruction
+vectors cover signed/zero displacements, stack/index policies, conditional
+writes, compressed AVX-512 displacements, boundary trust, and strict grammar.
+These vectors require the optional instruction-decoder capability. Core-only
+builds must report `UnsupportedFeature` when compiling an `insn` stage.

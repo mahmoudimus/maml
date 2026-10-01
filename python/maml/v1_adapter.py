@@ -30,10 +30,10 @@ def execute(request):
         if op == 'pipeline':
             raw = request['image']
             def ranges(name):
-                return [(int(lo,16),int(hi,16)) for lo,hi in raw[name]]
+                return [(int(lo,16),int(hi,16)) for lo,hi in raw.get(name, [])]
             image = v1.Image(bytes.fromhex(raw['bytes']), base=int(raw['base'],16),
                 pointer_map={int(m['value'],16):int(m['address'],16) for m in raw['pointer_map']},
-                code=ranges('code'), rodata=ranges('rodata'), data_ranges=ranges('data'),
+                code=ranges('code'), rodata=ranges('rodata'), data_ranges=ranges('data'), instructions=ranges('instructions'),
                 functions=[v1.Function(int(f['entry'],16),[(int(lo,16),int(hi,16)) for lo,hi in f['spans']]) for f in raw['functions']])
             result = v1.Pipeline(request['pipeline']).run(image)
             if result.kind == 'matches':

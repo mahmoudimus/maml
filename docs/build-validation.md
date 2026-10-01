@@ -174,3 +174,40 @@ selected callback. Both the Python API and `mamlpipe` using exported manifests
 returned the expected results. Each `ptrrefs` run inspected 63,885,984 complete
 slots, mapped 283,244, and emitted one matching storage address. The tests locate
 addresses; they do not invoke callbacks or rename an analysis database.
+
+## Instruction-stage hardening, 2026-10-01
+
+The x86-64 instruction stage now uses validated instruction metadata by default,
+with explicit speculative linear decoding that stops on failure. Signed `disp`
+captures, encoded-byte `disp_addr` captures, normalized memory operands, strict
+constraints, and both builders are covered by regressions. Decoder-enabled
+packages statically bundle pinned Zydis decoder sources and Zycore headers;
+core profiles need none.
+
+| Check | Result |
+| --- | --- |
+| macOS ARM64 C++ tools and full suite | 137 cases / 857 assertions passed |
+| macOS ARM64 core-only C++ suite | 133 cases / 812 assertions passed |
+| macOS ARM64 Python suite | 342 passed, no skips |
+| Installed wheel built from the source distribution | 342 passed, no skips; 81 conformance vectors passed |
+| AddressSanitizer and UndefinedBehaviorSanitizer | Full 137-case native suite passed |
+| Core-only installed Python wheel | Decoder absent, byte/pointer pipelines work, `insn` rejects with `UnsupportedFeature` |
+| Installed CMake core and decoder consumers | Configure, link and execute on macOS ARM64 and Linux ARM64 |
+| Isolated Linux ARM64 / GCC 14.2 / CPython 3.13 | C++ suite, 342 Python tests, 81 vectors, installed-package verifier passed |
+| Distribution dependency inspection | One extension, original license notices, no external decoder dylib |
+| Workflow lint | `actionlint` passed |
+
+Boundary tests reject a window anchored inside a `movabs` immediate, mismatched
+decoded lengths, overlapping instruction ranges, and cross-span encodings.
+Operand tests distinguish stack/indexed/hidden accesses, conditional writes,
+zero and negative displacements, and scaled AVX-512 disp8 encodings. Native and
+Python projection order agree for signed values. CLI output retains negative
+signs and requires explicit boundary metadata unless linear mode is requested.
+Incremental enabled/disabled/enabled Python builds retain the requested
+capability each time. Installed CMake profiles also pass strict C11 builds with
+C extensions disabled, including Linux installations using `lib64`.
+
+These are synthetic regression, sanitizer, and packaging checks. No real-game
+field identities or data-flow relationships were certified. Windows runners
+and the remote GitHub CI matrix have not been executed for this working-tree
+change; the configured jobs build the bundled decoder without system packages.

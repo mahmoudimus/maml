@@ -32,11 +32,11 @@ str("SomeStringAnchor")
 ```
 
 See [build validation](docs/build-validation.md) for the current verification
-results. The implementation passes all 60 supplied v1 conformance vectors;
+results. The implementation passes all 81 supplied v1 conformance vectors;
 those finite cases do not establish complete language coverage.
 
-The language remains byte-oriented. Instruction-aware constructs such as
-`call(callee)` and `mov(...)` are outside v1.
+The pattern language remains byte-oriented. The optional `insn` pipeline stage
+filters decoded x86-64 memory operands; it does not infer object types or data flow.
 
 ## Contents
 
@@ -117,6 +117,8 @@ be shared between threads.
 | `str("text", match="contains")` | Starts of indexed strings containing the text; requires rodata |
 | `bytes("pattern")` | Match records across the image |
 | `find("pattern")` | Match records starting within enclosing functions; requires function ranges |
+| `insn("spec", within=N)` | Memory-operand matches at known instruction starts within the inclusive forward window |
+| `insn("spec")` | Memory-operand matches in all owned function spans |
 | `before("pattern", within=N)` | All matches ending 0..N bytes before each anchor |
 | `after("pattern", within=N)` | All matches starting 0..N bytes after each anchor instruction ends |
 | `capture("name")` | Present named values, deduplicated by value, kind, and space |
@@ -420,6 +422,92 @@ const auto query = maml::v1::PipelineBuilder().str("ClearScripts").xrefs()
     .before("E8 rel32(callee)", 32).build();
 // .after("E8 rel32(callee)", 32) requires anchor instruction ranges.
 ```
+
+### Instruction-aware operand matching
+
+`insn` decodes x86-64 instructions and returns one match per qualifying memory
+operand. The match offset is the instruction start. Use it to constrain an access
+near a known semantic anchor, rather than infer field identity from access width:
+
+```python
+query = (v1.PipelineBuilder().bytes("E8 rel32(callee)")
+         .insn("read size=16 base=rcx index=none disp(field)", within=32)
+         .unique().capture("field").build())
+# image.instructions must describe actual instruction ranges.
+field = query.run(image).values[0].value  # signed Python int
+```
+
+```cpp
+auto query = maml::v1::PipelineBuilder().bytes("E8 rel32(callee)")
+    .insn("read size=16 base=rcx index=none disp(field)", 32)
+    .unique().capture("field").build();
+auto result = query.run(image, code, rodata, functions, instructions);
+int64_t field = result.values.at(0).as_signed();
+```
+
+The spec contains exactly one access keyword (`read`, `write`, `lea`, or `mem`)
+and one capture. `read` and `write` include conditional and read-modify-write
+accesses; `mem` accepts any memory operand but excludes LEA. `lea` matches address
+calculation, and rejects `size=` because it does not read or write memory.
+
+| Constraint | Meaning and default |
+| --- | --- |
+| `size=N` | Access width in bytes: 1, 2, 4, 8, 16, 32 or 64; unconstrained by default |
+| `base=nonstack` | Default: GPR bases excluding RSP/RBP and their aliases; no proof of an object pointer |
+| `base=any`, `base=gpr`, `base=stack`, `base=none` | Explicitly broaden or select the base class |
+| `base=rcx`, `base=rip`, etc. | Exact decoded register name, including address-size variants such as ECX |
+| `index=none` | Default: no index register; `index=any` or an exact GPR index selects indexed addressing |
+| `operand=explicit` | Default: explicit memory operands; `operand=any` includes implicit/hidden operands |
+| `operand=N` | Exact zero-based decoded operand index, including register and hidden operands |
+| `mnemonic=mov` | Optional exact lowercase mnemonic |
+| `disp(name)` | Capture the signed decoded displacement, including zero without an encoded displacement |
+| `disp_addr(name)` | Capture the logical address of the encoded displacement; absent fields do not match |
+
+Duplicate constraints, unknown values, malformed identifiers, and multiple
+captures are compile errors. `@(name)` and `cursor` are not instruction-spec
+syntax. In byte patterns, `@(name)` retains its current-address meaning.
+
+`disp` produces kind `DisplacementValue` in space `scalar`. Python exposes a
+signed integer; C++ `Value::as_signed()` exposes int64 while `.value` retains the
+raw 64-bit storage used by existing address APIs. Scalars cannot feed address
+transforms. `disp_addr` produces `CursorAddress` in image space. Encoded width
+and decoded displacement differ: a disp8 can be negative or scaled by an EVEX
+tuple. Reading four bytes at a captured operand address is not a general way to
+recover its displacement; use `disp` for the semantic value.
+
+Default `decode="metadata"` requires `image.instructions`. It visits only
+provided starts and verifies each selected instruction's decoded length.
+Overlapping ranges, length mismatches, and instructions crossing a function
+span are execution errors. Metadata can contain gaps; those gaps are not decoded.
+For `within=N`, the input must itself be a known instruction start. Eligible
+starts are `[input, input+N]`, inclusive, clipped to the containing function span
+when available; the final instruction can extend beyond the start window.
+Without `within`, enclosing function metadata is required and all owned spans
+are searched without bridging gaps. Overlapping windows emit each operand once.
+
+If instruction metadata is unavailable, opt into speculative linear decoding:
+
+```python
+query = v1.PipelineBuilder().bytes("E8 ?? ?? ?? ??").insn(
+    "read size=4 disp(field)", within=32, decode="linear"
+).build()
+```
+
+```cpp
+auto query = maml::v1::PipelineBuilder().bytes("E8 ?? ?? ?? ??")
+    .insn("read size=4 disp(field)", 32, maml::v1::InstructionDecode::Linear).build();
+```
+
+Linear decoding starts at the anchor (or each function span start) and stops at
+the first invalid/truncated encoding. It never resynchronizes byte by byte.
+Starting inside an immediate or decoding embedded data can still yield valid
+instructions; this mode supplies no boundary proof. A supplied boundary list is
+also only as trustworthy as its producer, even when lengths agree.
+
+Place `unique` before `capture` to assert exactly one operand match. Placing it
+after `capture` asserts one distinct displacement: several sites using the same
+offset can pass that assertion. Neither proves object-field identity or data flow;
+use semantic anchors and independent-build verification for that purpose.
 
 ### Multiline pipelines and declarative builders
 
@@ -1066,7 +1154,7 @@ A relative target need not be readable when only captured. Following either
 kind of reference requires a readable location. Following does not perform an
 extra implicit pointer dereference.
 
-Capture data MUST retain its value, address space, and kind: `CursorAddress`,
+Byte-pattern capture data MUST retain its value, address space, and kind: `CursorAddress`,
 `ResolvedRelativeTarget`, or `AbsolutePointerValue`. A convenience API may
 return just a 64-bit value, but the implementation must retain that metadata.
 
@@ -1142,12 +1230,30 @@ Compilation and persisted artifacts MUST identify the dialect explicitly as
 The implementation's lexical, enumeration, and resource policies are described
 under [Using MAML v1](#using-maml-v1). The conformance vectors deliberately avoid
 depending on enumeration preferences. Portable compiled-program serialization
-and instruction recognition remain outside the current implementation.
+remains outside the current implementation. Instruction-aware matching is an
+optional pipeline extension, not a byte-pattern primitive.
 Implicit equality captures and public cursor-stack operations are outside v1.
 
 ## Build and run
 
-Requires CMake 3.19+, a C++20 compiler, and Python 3.10+ for the bindings.
+The core C++ API is header-only and needs no decoder. Standalone CMake builds
+and Python packages enable a pinned, bundled static Zydis 4.1.1 decoder by
+default. There is no system-package lookup, build-time download, runtime decoder
+DLL, or Homebrew dependency. Original MIT notices ship with distributions.
+
+CMake `add_subdirectory` consumers default to the core; enable instruction
+matching with `-DMAML_ENABLE_INSN=ON` before configuring. Link `maml::maml` as
+usual. Installed enabled packages export their static dependency and support
+`find_package(maml REQUIRED COMPONENTS insn)`. Set `MAML_ENABLE_INSN=OFF` for a
+core-only CMake build, or `MAML_ENABLE_INSN=0` in the environment when building a
+core-only Python package. Disabled builds reject `insn` compilation with
+`UnsupportedFeature`; Python exposes `v1.instruction_decoder_available()`.
+Rebuild C++/Cython consumers when changing this build profile and keep it
+consistent across translation units.
+
+
+Requires CMake 3.19+, a C++20 compiler, a C compiler when decoding is enabled,
+and Python 3.10+ for the bindings.
 
 ```sh
 uv venv .venv --python 3.13

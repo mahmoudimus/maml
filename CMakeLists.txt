@@ -44,26 +44,30 @@ target_include_directories(maml INTERFACE
 )
 target_compile_features(maml INTERFACE cxx_std_20)
 
-# ── Zydis: instruction-aware matching (the `insn` stage, decode.hpp) ──────
-# The engine is otherwise byte-scanning only; Zydis is what lets a pattern
-# match on decoded operand semantics. Required -- decode.hpp includes it.
-find_package(Zydis CONFIG REQUIRED)
-target_link_libraries(maml INTERFACE Zydis::Zydis)
-# Zydis's exported config lists its Zycore dependency by bare name ("Zycore"),
-# and a Homebrew prefix is not on the default linker search path, so -lZycore
-# fails to resolve. Pull in the real Zycore target when present, and add the
-# directory that holds libZydis (same dir as libZycore) to the link path.
-find_package(zycore CONFIG QUIET)
-if(TARGET Zycore::Zycore)
-    target_link_libraries(maml INTERFACE Zycore::Zycore)
-endif()
-get_target_property(_maml_zydis_loc Zydis::Zydis IMPORTED_LOCATION_RELEASE)
-if(NOT _maml_zydis_loc)
-    get_target_property(_maml_zydis_loc Zydis::Zydis IMPORTED_LOCATION)
-endif()
-if(_maml_zydis_loc)
-    get_filename_component(_maml_zydis_dir "${_maml_zydis_loc}" DIRECTORY)
-    target_link_directories(maml INTERFACE $<BUILD_INTERFACE:${_maml_zydis_dir}>)
+# Decoder support is optional for C++ consumers; standalone tools/tests enable it.
+option(MAML_ENABLE_INSN "Enable the bundled x86-64 instruction decoder" ${MAML_MAIN_PROJECT})
+if(MAML_ENABLE_INSN)
+    enable_language(C)
+    set(_maml_decoder_root "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zydis")
+    file(READ "${_maml_decoder_root}/sources.json" _maml_decoder_manifest)
+    string(JSON _maml_source_count LENGTH "${_maml_decoder_manifest}")
+    math(EXPR _maml_source_last "${_maml_source_count} - 1")
+    set(_maml_decoder_sources)
+    foreach(_maml_i RANGE ${_maml_source_last})
+        string(JSON _maml_source GET "${_maml_decoder_manifest}" ${_maml_i})
+        list(APPEND _maml_decoder_sources "${_maml_decoder_root}/${_maml_source}")
+    endforeach()
+    add_library(maml_decoder STATIC ${_maml_decoder_sources})
+    add_library(maml::decoder ALIAS maml_decoder)
+    set_target_properties(maml_decoder PROPERTIES EXPORT_NAME decoder POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(maml_decoder PUBLIC MAML_ENABLE_INSN=1
+        ZYDIS_STATIC_BUILD ZYCORE_STATIC_BUILD ZYDIS_DISABLE_ENCODER ZYDIS_DISABLE_FORMATTER)
+    target_include_directories(maml_decoder
+        PUBLIC $<BUILD_INTERFACE:${_maml_decoder_root}/include>
+            $<BUILD_INTERFACE:${_maml_decoder_root}/dependencies/zycore/include>
+            $<INSTALL_INTERFACE:include/maml/vendor>
+        PRIVATE "${_maml_decoder_root}/src")
+    target_link_libraries(maml INTERFACE maml_decoder)
 endif()
 
 # ── mamlscan: the CLI ────────────────────────────────────────────────────
@@ -129,6 +133,13 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 install(TARGETS maml EXPORT maml-targets)
+if(MAML_ENABLE_INSN)
+    install(TARGETS maml_decoder EXPORT maml-targets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(DIRECTORY third_party/zydis/include/ third_party/zydis/dependencies/zycore/include/
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/maml/vendor)
+    install(FILES third_party/zydis/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/maml RENAME Zydis-LICENSE)
+    install(FILES third_party/zydis/dependencies/zycore/LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/maml RENAME Zycore-LICENSE)
+endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT maml-targets
     FILE maml-targets.cmake

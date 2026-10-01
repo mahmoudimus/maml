@@ -1,6 +1,6 @@
 # cython: language_level=3
 """Native execution bridge for the explicit MAML v1 dialect."""
-from libc.stdint cimport uint8_t, uint64_t
+from libc.stdint cimport uint8_t, uint64_t, int64_t
 from libcpp cimport bool as cbool
 from libcpp.string cimport string
 from libcpp.vector cimport vector
@@ -46,6 +46,8 @@ cdef extern from "maml/v1_pipeline.hpp" namespace "maml::v1" nogil:
         uint64_t value
         string kind
         string space
+        cbool is_signed()
+        int64_t as_signed() except +maml_v1_error
     cdef cppclass CCapture "maml::v1::NamedCapture":
         string name
         CValue data
@@ -79,6 +81,12 @@ cdef extern from "maml/v1_pipeline.hpp" namespace "maml::v1" nogil:
     cdef cppclass CPipeline "maml::v1::Pipeline":
         CPipeline(const string&) except +maml_v1_error
 
+cdef extern from "maml/decode.hpp" namespace "maml::decode":
+    const cbool available
+
+def instruction_decoder_available():
+    return bool(available)
+
 cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
     cdef cppclass CRange "maml::generate::Range":
         CRange()
@@ -86,6 +94,8 @@ cdef extern from "maml/generate.hpp" namespace "maml::generate" nogil:
         uint64_t end
 
 cdef object value(const CValue& v):
+    if v.is_signed():
+        return (v.as_signed(), v.kind.decode(), v.space.decode())
     return (v.value, v.kind.decode(), v.space.decode())
 
 cdef list matches(const vector[CMatch]& items):

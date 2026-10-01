@@ -2,4 +2,9 @@
 
 include("${CMAKE_CURRENT_LIST_DIR}/maml-targets.cmake")
 
+# Enabled packages export their bundled static decoder in the same target set.
+# No external find_dependency or system library search is needed.
+set(maml_INSN_ENABLED @MAML_ENABLE_INSN@)
+set(maml_insn_FOUND ${maml_INSN_ENABLED})
+
 check_required_components(maml)

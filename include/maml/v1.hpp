@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSL-1.0 OR MIT
 #pragma once
 #include "mamlscan.hpp"
+#include <bit>
 #include <charconv>
 #include <map>
 #include <set>
@@ -17,7 +18,22 @@ namespace maml::v1 {
     struct Value {
         uint64_t value = 0;
         std::string kind = "CursorAddress", space = "image";
-        auto operator<=>(const Value&) const = default;
+        // Keep full-width address storage; displacement scalars use signed bits.
+        bool is_signed() const {
+            return kind == "DisplacementValue";
+        }
+        int64_t as_signed() const {
+            if (!is_signed())
+                throw Error("InvalidType", "Value is not a signed displacement");
+            return std::bit_cast<int64_t>(value);
+        }
+        auto operator<=>(const Value& other) const {
+            // Numeric ordering agrees with Python while retaining uint64 addresses.
+            const bool negative = is_signed() && as_signed() < 0;
+            const bool other_negative = other.is_signed() && other.as_signed() < 0;
+            return std::tuple{ !negative, value, kind, space } <=> std::tuple{ !other_negative, other.value, other.kind, other.space };
+        }
+        bool operator==(const Value&) const = default;
     };
     struct NamedCapture {
         std::string name;
@@ -44,7 +60,8 @@ namespace maml::v1 {
         std::map<uint64_t, uint64_t> pointer_map;
         std::optional<uint64_t> mapped_pointer(uint64_t raw) const {
             auto it = pointer_map.find(raw);
-            if (it == pointer_map.end() || !readable(it->second)) return std::nullopt;
+            if (it == pointer_map.end() || !readable(it->second))
+                return std::nullopt;
             return it->second;
         }
         bool readable(uint64_t address) const {
@@ -548,7 +565,8 @@ namespace maml::v1 {
                     uint64_t destination = target;
                     if (absolute) {
                         auto mapped = image.mapped_pointer(target);
-                        if (!mapped) break;
+                        if (!mapped)
+                            break;
                         destination = *mapped;
                     }
                     if (!image.readable(destination))

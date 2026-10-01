@@ -1,57 +1,10 @@
 // SPDX-License-Identifier: BSL-1.0 OR MIT
 #pragma once
-#include "decode.hpp"
 #include "generate.hpp"
 #include "v1.hpp"
+#include "v1_insn.hpp"
 
 namespace maml::v1 {
-    // Constraints for the instruction-aware `insn` stage. Parsed from a small
-    // space-separated spec: an access keyword (read|write|lea|mem), an optional
-    // size=N (memory access width in bytes), and a required @(name) capture for
-    // the memory operand's displacement.
-    struct InsnSpec {
-        enum Access { Any, Read, Write, Lea } access = Any;
-        unsigned size = 0; // 0 = unconstrained
-        std::string capture;
-        static InsnSpec parse(std::string_view spec) {
-            InsnSpec out;
-            bool access_set = false, capture_set = false;
-            size_t p = 0;
-            auto ws = [&] { while (p < spec.size() && std::isspace((unsigned char)spec[p])) ++p; };
-            while (true) {
-                ws();
-                if (p >= spec.size()) break;
-                size_t begin = p;
-                while (p < spec.size() && !std::isspace((unsigned char)spec[p])) ++p;
-                std::string_view tok = spec.substr(begin, p - begin);
-                if (tok == "read" || tok == "write" || tok == "lea" || tok == "mem") {
-                    if (access_set) throw Error("InvalidArgument", "insn: duplicate access keyword");
-                    out.access = tok == "read" ? Read : tok == "write" ? Write : tok == "lea" ? Lea : Any;
-                    access_set = true;
-                } else if (tok.substr(0, 5) == "size=") {
-                    auto n = tok.substr(5);
-                    unsigned v = 0;
-                    auto r = std::from_chars(n.data(), n.data() + n.size(), v);
-                    if (r.ec != std::errc{} || r.ptr != n.data() + n.size())
-                        throw Error("InvalidArgument", "insn: size must be a decimal integer");
-                    if (v != 1 && v != 2 && v != 4 && v != 8 && v != 16 && v != 32)
-                        throw Error("InvalidArgument", "insn: size must be 1,2,4,8,16,32 bytes");
-                    out.size = v;
-                } else if (tok.size() >= 4 && tok.substr(0, 2) == "@(" && tok.back() == ')') {
-                    if (capture_set) throw Error("InvalidArgument", "insn: at most one @(name) capture");
-                    out.capture = std::string(tok.substr(2, tok.size() - 3));
-                    for (char c : out.capture)
-                        if (!(std::isalnum((unsigned char)c) || c == '_'))
-                            throw Error("InvalidArgument", "insn: capture name must be [A-Za-z0-9_]");
-                    if (out.capture.empty()) throw Error("InvalidArgument", "insn: empty capture name");
-                    capture_set = true;
-                } else
-                    throw Error("InvalidArgument", "insn: unknown token '" + std::string(tok) + "'");
-            }
-            if (!capture_set) throw Error("InvalidArgument", "insn requires a @(name) displacement capture");
-            return out;
-        }
-    };
     struct Trace {
         std::string stage;
         size_t into = 0;
@@ -77,6 +30,8 @@ namespace maml::v1 {
             int64_t displacement = 0;
             std::optional<Pattern> pattern;
             std::optional<InsnSpec> insn;
+            InstructionDecode decoding = InstructionDecode::Metadata;
+            bool within = false; // insn: decode a cursor window of `number` bytes, not whole functions
         };
         std::vector<Stage> stages_;
         static bool in(std::span<const maml::generate::Range> ranges, uint64_t a) {
@@ -150,7 +105,8 @@ namespace maml::v1 {
                     } else {
                         ws();
                         size_t start = p;
-                        if (s.name == "offset" && p < source.size() && source[p] == '-') ++p;
+                        if (s.name == "offset" && p < source.size() && source[p] == '-')
+                            ++p;
                         while (p < source.size() && std::isdigit(static_cast<unsigned char>(source[p])))
                             ++p;
                         auto r = s.name == "offset" ? std::from_chars(source.data() + start, source.data() + p, s.displacement) : std::from_chars(source.data() + start, source.data() + p, s.number);
@@ -180,20 +136,47 @@ namespace maml::v1 {
                     }
                     if (s.name == "str" && s.string_match == "contains" && s.argument.empty())
                         throw Error("InvalidArgument", "contains requires a nonempty needle", p);
-                    if (directional) {
-                        need(',');
+                    if (directional || s.name == "insn") {
+                        bool decode_set = false;
                         ws();
-                        if (source.substr(p, 6) != "within")
-                            throw Error("InvalidArgument", "Expected within=N", p);
-                        p += 6;
-                        need('=');
-                        ws();
-                        size_t start = p;
-                        while (p < source.size() && std::isdigit(static_cast<unsigned char>(source[p])))
+                        while (p < source.size() && source[p] == ',') {
                             ++p;
-                        auto parsed = std::from_chars(source.data() + start, source.data() + p, s.number);
-                        if (start == p || parsed.ec != std::errc{})
-                            throw Error("InvalidArgument", "within must be an unsigned 64-bit integer", start);
+                            ws();
+                            size_t key_begin = p;
+                            while (p < source.size() && std::isalpha(static_cast<unsigned char>(source[p])))
+                                ++p;
+                            const auto key = source.substr(key_begin, p - key_begin);
+                            need('=');
+                            ws();
+                            if (key == "within") {
+                                if (s.within)
+                                    throw Error("InvalidArgument", "Repeated within", p);
+                                s.within = true;
+                                size_t start = p;
+                                while (p < source.size() && std::isdigit(static_cast<unsigned char>(source[p])))
+                                    ++p;
+                                auto parsed = std::from_chars(source.data() + start, source.data() + p, s.number);
+                                if (start == p || parsed.ec != std::errc{})
+                                    throw Error("InvalidArgument", "within must be an unsigned 64-bit integer", start);
+                            } else if (key == "decode" && s.name == "insn") {
+                                if (decode_set)
+                                    throw Error("InvalidArgument", "Repeated decode", p);
+                                decode_set = true;
+                                need('"');
+                                size_t start = p;
+                                while (p < source.size() && source[p] != '"')
+                                    ++p;
+                                const auto mode = source.substr(start, p - start);
+                                need('"');
+                                if (mode != "metadata" && mode != "linear")
+                                    throw Error("InvalidArgument", "decode must be metadata or linear", start);
+                                s.decoding = mode == "linear" ? InstructionDecode::Linear : InstructionDecode::Metadata;
+                            } else
+                                throw Error("InvalidArgument", "Unknown stage option", key_begin);
+                            ws();
+                        }
+                        if (directional && !s.within)
+                            throw Error("InvalidArgument", "Expected within=N", p);
                     }
                     need(')');
                 } else if (s.name != "xrefs" && s.name != "func" && s.name != "callers" && s.name != "unique" && s.name != "ptrrefs" && s.name != "read_ptr")
@@ -338,7 +321,8 @@ namespace maml::v1 {
                         };
                         auto read64 = [&](uint64_t at) {
                             uint64_t raw = 0;
-                            for (size_t k = 0; k < 8; ++k) raw |= uint64_t(image.bytes[size_t(at) + k]) << (8*k);
+                            for (size_t k = 0; k < 8; ++k)
+                                raw |= uint64_t(image.bytes[size_t(at) + k]) << (8 * k);
                             return raw;
                         };
                         if (s.name == "offset") {
@@ -352,53 +336,74 @@ namespace maml::v1 {
                         } else if (s.name == "read_ptr") {
                             trace.pointer_stats = true;
                             for (auto at : inputs) {
-                                if (at > image.bytes.size() || image.bytes.size() - at < 8) fail(at, "truncated pointer");
+                                if (at > image.bytes.size() || image.bytes.size() - at < 8)
+                                    fail(at, "truncated pointer");
                                 ++trace.candidates;
                                 auto dest = image.mapped_pointer(read64(at));
-                                if (!dest) fail(at, "unmapped or invalid pointer destination");
+                                if (!dest)
+                                    fail(at, "unmapped or invalid pointer destination");
                                 ++trace.mapped;
-                                r.values.push_back(Value{*dest, "MappedPointerAddress", "image"});
+                                r.values.push_back(Value{ *dest, "MappedPointerAddress", "image" });
                             }
                         } else {
                             trace.pointer_stats = true;
                             std::vector<maml::generate::Range> ranges(data.begin(), data.end());
                             ranges.insert(ranges.end(), rodata.begin(), rodata.end());
                             for (auto r : ranges)
-                                if (r.begin > r.end || r.end > image.bytes.size()) fail(r.begin, "invalid data range");
+                                if (r.begin > r.end || r.end > image.bytes.size())
+                                    fail(r.begin, "invalid data range");
                             for (auto c : code) {
-                                if (c.begin > c.end || c.end > image.bytes.size()) fail(c.begin, "invalid code range");
-                                if (c.begin == c.end) continue;
+                                if (c.begin > c.end || c.end > image.bytes.size())
+                                    fail(c.begin, "invalid code range");
+                                if (c.begin == c.end)
+                                    continue;
                                 std::vector<maml::generate::Range> next;
                                 for (auto r : ranges) {
-                                    if (c.end <= r.begin || c.begin >= r.end) next.push_back(r);
+                                    if (c.end <= r.begin || c.begin >= r.end)
+                                        next.push_back(r);
                                     else {
-                                        if (r.begin < c.begin) next.push_back({r.begin, c.begin});
-                                        if (c.end < r.end) next.push_back({c.end, r.end});
+                                        if (r.begin < c.begin)
+                                            next.push_back({ r.begin, c.begin });
+                                        if (c.end < r.end)
+                                            next.push_back({ c.end, r.end });
                                     }
                                 }
                                 ranges = std::move(next);
                             }
-                            std::sort(ranges.begin(), ranges.end(), [](auto a, auto b){return a.begin < b.begin;});
+                            std::sort(ranges.begin(), ranges.end(), [](auto a, auto b) {
+                                return a.begin < b.begin;
+                            });
                             for (auto r : ranges) {
-                                if (r.begin == r.end) continue;
+                                if (r.begin == r.end)
+                                    continue;
                                 if (!trace.searched_ranges.empty() && r.begin < trace.searched_ranges.back().end)
                                     trace.searched_ranges.back().end = std::max(r.end, trace.searched_ranges.back().end);
-                                else trace.searched_ranges.push_back(r);
+                                else
+                                    trace.searched_ranges.push_back(r);
                             }
-                            if (trace.searched_ranges.empty()) throw Error("MissingMetadata", "ptrrefs requires non-code data ranges");
+                            if (trace.searched_ranges.empty())
+                                throw Error("MissingMetadata", "ptrrefs requires non-code data ranges");
                             std::unordered_set<uint64_t> wanted(inputs.begin(), inputs.end());
-                            if (!wanted.empty()) for (auto range : trace.searched_ranges) {
-                                for (uint64_t at = range.begin; range.end - at >= 8; ++at) {
-                                    ++trace.candidates;
-                                    auto raw = read64(at);
-                                    auto it = image.pointer_map.find(raw);
-                                    if (it == image.pointer_map.end()) { ++trace.unmapped; continue; }
-                                    auto dest = image.mapped_pointer(raw);
-                                    if (!dest) { ++trace.invalid; continue; }
-                                    ++trace.mapped;
-                                    if (wanted.count(*dest - image.base)) r.values.push_back(address(at));
+                            if (!wanted.empty())
+                                for (auto range : trace.searched_ranges) {
+                                    for (uint64_t at = range.begin; range.end - at >= 8; ++at) {
+                                        ++trace.candidates;
+                                        auto raw = read64(at);
+                                        auto it = image.pointer_map.find(raw);
+                                        if (it == image.pointer_map.end()) {
+                                            ++trace.unmapped;
+                                            continue;
+                                        }
+                                        auto dest = image.mapped_pointer(raw);
+                                        if (!dest) {
+                                            ++trace.invalid;
+                                            continue;
+                                        }
+                                        ++trace.mapped;
+                                        if (wanted.count(*dest - image.base))
+                                            r.values.push_back(address(at));
+                                    }
                                 }
-                            }
                         }
                     } else if (s.name == "str") {
                         if (rodata.empty())
@@ -463,40 +468,94 @@ namespace maml::v1 {
                         r.is_matches = true;
                         r.schema = s.pattern->schema();
                     } else if (s.name == "insn") {
-                        if (functions.empty())
-                            throw Error("MissingMetadata", "insn requires function metadata");
-                        const auto& spec = *s.insn;
-                        std::set<std::pair<uint64_t, uint64_t>> scopes;
-                        for (auto at : inputs)
-                            if (auto f = maml::generate::enclosing_function(indexed, at))
-                                for (auto span : f->spans)
-                                    scopes.insert({ span.begin, span.end });
-                        for (auto [lo, hi] : scopes) {
-                            const uint64_t end = std::min<uint64_t>(hi, image.bytes.size());
-                            uint64_t at = lo;
-                            while (at < end) {
-                                auto di = maml::decode::decode_one(image.bytes.data() + size_t(at), size_t(end - at));
-                                if (!di || di->length == 0) { ++at; continue; } // resync past a bad byte
-                                const auto& m = di->mem;
-                                bool ok = m.present && m.base_is_gpr && !m.base_is_rip && m.has_displacement;
-                                if (ok) switch (spec.access) {
-                                    case InsnSpec::Read: ok = m.reads && !di->is_lea; break;
-                                    case InsnSpec::Write: ok = m.writes; break;
-                                    case InsnSpec::Lea: ok = di->is_lea; break;
-                                    case InsnSpec::Any: ok = !di->is_lea; break;
-                                }
-                                if (ok && spec.size && spec.access != InsnSpec::Lea)
-                                    ok = m.size_bytes == spec.size;
-                                if (ok) {
-                                    Match hit{ at, { spec.capture }, {} };
-                                    hit.captures.push_back({ spec.capture,
-                                        Value{ uint64_t(m.displacement), "DisplacementValue", "scalar" } });
-                                    r.matches.push_back(std::move(hit));
-                                }
-                                at += di->length;
+                        if (s.decoding == InstructionDecode::Metadata && instruction_ends.empty())
+                            throw Error("MissingMetadata", "insn requires instruction metadata; decode=\"linear\" is explicit speculative decoding");
+                        if (functions.empty() && !s.within)
+                            throw Error("MissingMetadata", "insn requires function metadata without within");
+                        if (s.decoding == InstructionDecode::Metadata) {
+                            uint64_t last_end = 0;
+                            for (auto [begin, end] : instruction_ends) {
+                                if (begin < last_end)
+                                    throw Error("InvalidInstructionMetadata", "Overlapping instruction metadata");
+                                last_end = end;
                             }
                         }
-                        std::sort(r.matches.begin(), r.matches.end(), [](const Match& a, const Match& b) {
+                        const auto& spec = *s.insn;
+                        std::vector<maml::generate::Range> coverage;
+                        for (const auto& f : functions)
+                            coverage.insert(coverage.end(), f.spans.begin(), f.spans.end());
+                        std::sort(coverage.begin(), coverage.end(), [](auto a, auto b) {
+                            return a.begin < b.begin;
+                        });
+                        auto crosses_span = [&](uint64_t at, uint64_t known_end) {
+                            auto next = std::upper_bound(coverage.begin(), coverage.end(), at,
+                                [](uint64_t a, auto span) {
+                                    return a < span.begin;
+                                });
+                            if (next != coverage.begin() && at < std::prev(next)->end)
+                                return known_end > std::prev(next)->end;
+                            return next != coverage.end() && next->begin < known_end;
+                        };
+                        struct Window {
+                            uint64_t lo, starts_end, decode_end;
+                            auto operator<=>(const Window&) const = default;
+                        };
+                        std::set<Window> scopes;
+                        for (auto at : inputs) {
+                            if (s.within) {
+                                if (at >= image.bytes.size())
+                                    throw Error("InvalidAddress", "Anchor outside image");
+                                if (s.decoding == InstructionDecode::Metadata && !instruction_ends.contains(at))
+                                    throw Error("InvalidInstructionBoundary", "insn window anchor is not a known instruction boundary");
+                                uint64_t limit = image.bytes.size();
+                                if (auto f = maml::generate::enclosing_function(indexed, at))
+                                    for (auto span : f->spans)
+                                        if (span.begin <= at && at < span.end)
+                                            limit = std::min<uint64_t>(limit, span.end);
+                                const auto remaining = limit - at;
+                                const auto count = std::min<uint64_t>(s.number, remaining - 1) + 1;
+                                scopes.insert({ at, at + count, limit });
+                            } else if (auto f = maml::generate::enclosing_function(indexed, at))
+                                for (auto span : f->spans)
+                                    scopes.insert({ span.begin, span.end, span.end });
+                        }
+                        std::set<std::pair<uint64_t, unsigned>> emitted;
+                        auto emit = [&](uint64_t at, const decode::Instruction& di) {
+                            for (const auto& m : di.memory) {
+                                if (!spec.matches(di, m) || !emitted.insert({ at, m.index }).second)
+                                    continue;
+                                Match hit{ at, { spec.capture }, {} };
+                                hit.captures.push_back({ spec.capture, spec.displacement_address
+                                                                           ? address(at + m.disp_offset)
+                                                                           : Value{ std::bit_cast<uint64_t>(m.displacement), "DisplacementValue", "scalar" } });
+                                r.matches.push_back(std::move(hit));
+                            }
+                        };
+                        for (auto [lo, starts_end, decode_end] : scopes) {
+                            const uint64_t end = std::min<uint64_t>(decode_end, image.bytes.size());
+                            if (s.decoding == InstructionDecode::Metadata) {
+                                for (auto it = instruction_ends.lower_bound(lo); it != instruction_ends.end() && it->first < starts_end; ++it) {
+                                    const auto [at, known_end] = *it;
+                                    if (known_end > end)
+                                        throw Error("InvalidInstructionMetadata", "Instruction crosses a function span boundary");
+                                    if (crosses_span(at, known_end))
+                                        throw Error("InvalidInstructionMetadata", "Instruction crosses its owning function span boundary");
+                                    auto di = decode::decode_one(image.bytes.data() + size_t(at), size_t(known_end - at));
+                                    if (!di || di->length != known_end - at)
+                                        throw Error("InvalidInstructionMetadata", "Instruction metadata disagrees with decoded length");
+                                    emit(at, *di);
+                                }
+                            } else {
+                                for (uint64_t at = lo; at < std::min(starts_end, end);) {
+                                    auto di = decode::decode_one(image.bytes.data() + size_t(at), size_t(end - at));
+                                    if (!di || !di->length)
+                                        break;
+                                    emit(at, *di);
+                                    at += di->length;
+                                }
+                            }
+                        }
+                        std::stable_sort(r.matches.begin(), r.matches.end(), [](const Match& a, const Match& b) {
                             return a.offset < b.offset;
                         });
                         r.is_matches = true;
@@ -506,7 +565,9 @@ namespace maml::v1 {
                             throw Error("MissingMetadata", "func requires function metadata");
                         for (auto at : inputs) {
                             if (s.modifier == "strict") {
-                                const bool entry = std::any_of(functions.begin(), functions.end(), [&](const auto& f) { return f.entry == at; });
+                                const bool entry = std::any_of(functions.begin(), functions.end(), [&](const auto& f) {
+                                    return f.entry == at;
+                                });
                                 if (!entry)
                                     throw Error("NotFunctionEntry",
                                         "func:strict requires every input to be a known function entry; rejected offset " + std::to_string(at));
@@ -622,8 +683,14 @@ namespace maml::v1 {
         PipelineBuilder find(std::string_view text) const {
             return append("find(" + quote(text) + ")");
         }
-        PipelineBuilder insn(std::string_view spec) const {
-            return append("insn(" + quote(spec) + ")");
+        PipelineBuilder insn(std::string_view spec, InstructionDecode mode = InstructionDecode::Metadata) const {
+            return insn(spec, std::nullopt, mode);
+        }
+        PipelineBuilder insn(std::string_view spec, std::optional<uint64_t> within, InstructionDecode mode = InstructionDecode::Metadata) const {
+            if (mode != InstructionDecode::Metadata && mode != InstructionDecode::Linear)
+                throw Error("InvalidArgument", "Invalid instruction decode mode");
+            return append("insn(" + quote(spec) + (within ? ", within=" + std::to_string(*within) : "") +
+                          (mode == InstructionDecode::Linear ? ", decode=\"linear\"" : "") + ")");
         }
         PipelineBuilder before(std::string_view pattern, uint64_t within) const {
             return append("before(" + quote(pattern) + ", within=" + std::to_string(within) + ")");
@@ -637,9 +704,15 @@ namespace maml::v1 {
         PipelineBuilder xrefs() const {
             return append("xrefs");
         }
-        PipelineBuilder ptrrefs() const { return append("ptrrefs"); }
-        PipelineBuilder read_ptr() const { return append("read_ptr"); }
-        PipelineBuilder offset(int64_t n) const { return append("offset(" + std::to_string(n) + ")"); }
+        PipelineBuilder ptrrefs() const {
+            return append("ptrrefs");
+        }
+        PipelineBuilder read_ptr() const {
+            return append("read_ptr");
+        }
+        PipelineBuilder offset(int64_t n) const {
+            return append("offset(" + std::to_string(n) + ")");
+        }
         PipelineBuilder callers() const {
             return append("callers");
         }

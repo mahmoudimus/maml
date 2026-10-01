@@ -113,3 +113,16 @@ def test_adapter_nonzero_exit_is_a_failure():
 def test_adapter_timeout_is_a_failure():
     with pytest.raises(runner.ConformanceError, match="timed out"):
         runner.run_adapter(cases()[:1], [sys.executable, "-c", "import time; time.sleep(3)"], timeout=0.05)
+
+
+@pytest.mark.parametrize('value,space', [('-0x0','scalar'), ('0x8000000000000000','scalar'),
+                                      ('-0x8000000000000001','scalar'), ('-0x8','image'),
+                                      (-8,'scalar')])
+def test_signed_displacement_transport_rejects_invalid_values(value, space):
+    with pytest.raises(runner.ConformanceError):
+        runner.capture({'value':value,'kind':'DisplacementValue','space':space})
+
+
+def test_signed_displacement_transport_keeps_int64_endpoints():
+    for raw in ('-0x8000000000000000', '0x7fffffffffffffff', '-0x8', '0x0'):
+        runner.capture({'value':raw,'kind':'DisplacementValue','space':'scalar'})

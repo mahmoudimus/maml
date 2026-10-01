@@ -6,7 +6,7 @@ All pattern/pipeline parsing and binary execution run in the C++ frontend.
 from ._containers import Function, validate_functions
 from dataclasses import dataclass
 from types import MappingProxyType
-from maml._core import NativePattern, NativePipeline
+from maml._core import NativePattern, NativePipeline, instruction_decoder_available
 
 DIALECT = "maml-v1"
 
@@ -40,7 +40,8 @@ def _native(call, *args, **kwargs):
             raise SchemaError(code, message, position) from exc
         if code == 'Cardinality':
             raise CardinalityError(message) from exc
-        if code in {'MissingMetadata', 'ResourceLimit', 'NotFunctionEntry', 'InvalidAddress'}:
+        if code in {'MissingMetadata', 'ResourceLimit', 'NotFunctionEntry', 'InvalidAddress',
+                    'InvalidInstructionBoundary', 'InvalidInstructionMetadata'}:
             raise ExecutionError(code, message, position) from exc
         raise CompileError(code, message, position) from exc
 
@@ -58,7 +59,12 @@ class CaptureValue:
     space: str
 
     def __post_init__(self):
-        _u64(self.value)
+        if self.kind == 'DisplacementValue':
+            if (not isinstance(self.value, int) or isinstance(self.value, bool)
+                    or not -(1 << 63) <= self.value < (1 << 63) or self.space != 'scalar'):
+                raise ValueError('Expected a signed 64-bit displacement scalar')
+        else:
+            _u64(self.value)
 
 
 @dataclass(frozen=True)
@@ -248,6 +254,13 @@ class PipelineBuilder:
 
     def capture(self, name):
         return self._append('capture(' + _quote_pipeline_argument(name) + ')')
+
+    def insn(self, spec, *, within=None, decode='metadata'):
+        if decode not in {'metadata', 'linear'}:
+            raise ValueError('decode must be metadata or linear')
+        window = '' if within is None else f', within={_u64(within)}'
+        mode = '' if decode == 'metadata' else ', decode="linear"'
+        return self._append('insn(' + _quote_pipeline_argument(spec) + window + mode + ')')
 
     def xrefs(self):
         return self._append('xrefs')

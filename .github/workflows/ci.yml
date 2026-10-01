@@ -132,7 +132,7 @@ jobs:
       run: python tools/check_conformance.py --adapter python -m maml.v1_adapter
 
   consume:
-    name: Consumable via add_subdirectory
+    name: C++ core and installed decoder consumers
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
@@ -159,3 +159,6 @@ jobs:
         cmake -S /tmp/consumer -B /tmp/consumer/build
         cmake --build /tmp/consumer/build
         /tmp/consumer/build/consumer
+
+    - name: Build and consume installed core and decoder profiles
+      run: python3 tools/check_cpp_package.py

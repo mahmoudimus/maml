@@ -3,7 +3,7 @@ include LICENSE README.md
 include CMakeLists.txt .clang-format .clang-tidy
 recursive-include cmake *.in
 recursive-include tests *.cpp *.py
-recursive-include third_party *.hpp
+recursive-include third_party *.hpp *.h *.c *.inc *.json *.md LICENSE
 recursive-include tools *.cpp *.py *.md
 include docs/build-validation.md
 recursive-include conformance *.md *.json

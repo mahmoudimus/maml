@@ -1,0 +1,12 @@
+[
+  "src/MetaInfo.c",
+  "src/Mnemonic.c",
+  "src/Register.c",
+  "src/Segment.c",
+  "src/SharedData.c",
+  "src/String.c",
+  "src/Utils.c",
+  "src/Zydis.c",
+  "src/Decoder.c",
+  "src/DecoderData.c"
+]

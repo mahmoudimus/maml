@@ -29,6 +29,7 @@ def main(argv=None) -> int:
     # "wheel OK". The env var stays as a fallback for local runs.
     ap.add_argument("--expect-simd", choices=("neon", "sse2", "scalar"),
                     default=os.environ.get("MAML_EXPECT_SIMD"))
+    ap.add_argument("--expect-insn", choices=("enabled", "disabled"), default="enabled")
     args = ap.parse_args(argv)
 
     import maml
@@ -99,6 +100,27 @@ def main(argv=None) -> int:
     if resolved.trace[1].pointer_stats['mapped'] != 2:
         return fail("pointer traversal trace did not survive installed bindings")
     print("  pointers:     table traversal and trace passed")
+
+    from maml import v1
+    enabled = args.expect_insn == 'enabled'
+    if v1.instruction_decoder_available() != enabled:
+        return fail("instruction decoder capability does not match the requested wheel profile")
+    query = 'bytes("C3") -> insn("read size=4 disp(field)") -> capture("field") -> unique'
+    if enabled:
+        fields = maml.Image(bytes.fromhex('8B 41 F8 C3'),
+            functions=[maml.Function(0, [(0, 4)])], instructions=[(0, 3), (3, 4)])
+        result = maml.Pipeline(query).run(fields)
+        if result.values != (maml.CaptureValue(-8, 'DisplacementValue', 'scalar'),):
+            return fail("instruction decoding or signed capture failed in installed bindings")
+    else:
+        try:
+            maml.Pipeline(query)
+        except v1.CompileError as exc:
+            if exc.code != 'UnsupportedFeature':
+                return fail("core wheel did not reject unavailable decoding explicitly")
+        else:
+            return fail("core wheel unexpectedly accepts the instruction stage")
+    print(f"  instructions: {args.expect_insn}")
     print("wheel OK")
     return 0
 

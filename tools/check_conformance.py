@@ -9,7 +9,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-KINDS = {"CursorAddress", "ResolvedRelativeTarget", "AbsolutePointerValue", "MappedPointerAddress", "ReadValue"}
+KINDS = {"CursorAddress", "ResolvedRelativeTarget", "AbsolutePointerValue", "MappedPointerAddress", "ReadValue", "DisplacementValue"}
 OPERATIONS = {"compile", "match_at", "project", "lookup", "unique_matches", "pipeline"}
 STATUSES = {"ok", "no_match", "compile_error", "schema_error", "cardinality_error", "execution_error"}
 
@@ -32,8 +32,15 @@ def integer(text):
 def capture(value):
     require(isinstance(value, dict) and set(value) == {"value", "kind", "space"},
             "capture must have value, kind, and space")
-    integer(value["value"])
     require(value["kind"] in KINDS, "unknown capture kind")
+    if value['kind'] == 'DisplacementValue':
+        raw = value['value']
+        require(isinstance(raw, str) and re.fullmatch(r'-?0x(?:0|[1-9a-f][0-9a-f]{0,15})', raw)
+                and raw != '-0x0', 'expected canonical signed displacement hex')
+        require(-(1 << 63) <= int(raw, 16) < (1 << 63), 'displacement exceeds int64')
+        require(value['space'] == 'scalar', 'displacement must be a scalar')
+    else:
+        integer(value["value"])
     require(isinstance(value["space"], str) and value["space"], "missing capture address space")
 
 
@@ -70,12 +77,13 @@ def validate_request(request):
     if op == "pipeline":
         require(isinstance(request['pipeline'], str), 'pipeline must be text')
         image = request['image']
-        require(isinstance(image, dict) and set(image) == {'bytes','base','pointer_map','code','rodata','data','functions'}, 'invalid pipeline image')
+        fields = {'bytes','base','pointer_map','code','rodata','data','functions'}
+        require(isinstance(image, dict) and fields <= set(image) <= fields | {'instructions'}, 'invalid pipeline image')
         validate_request({'dialect':'maml-v1','operation':'match_at','pattern':'','start_offset':'0x0',
                           'image':{k:image[k] for k in ('bytes','base','pointer_map')}})
-        for kind in ('code','rodata','data'):
-            require(isinstance(image[kind],list), 'ranges must be lists')
-            for span in image[kind]:
+        for kind in ('code','rodata','data','instructions'):
+            require(isinstance(image.get(kind, []),list), 'ranges must be lists')
+            for span in image.get(kind, []):
                 require(isinstance(span,list) and len(span)==2, 'invalid range')
                 require(integer(span[0]) <= integer(span[1]), 'reversed range')
         require(isinstance(image['functions'],list), 'functions must be a list')

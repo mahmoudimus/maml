@@ -1824,6 +1824,650 @@
         "status": "execution_error",
         "code": "InvalidAddress"
       }
+    },
+    {
+      "id": "insn_signed_disp8",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read size=4 disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 F8 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x3"
+            ],
+            [
+              "0x3",
+              "0x4"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "-0x8",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_zero_displacement",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 01 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x3"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x2"
+            ],
+            [
+              "0x2",
+              "0x3"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x0",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_stack_excluded",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 44 24 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x4"
+            ],
+            [
+              "0x4",
+              "0x5"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": []
+      }
+    },
+    {
+      "id": "insn_stack_explicit",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read base=stack disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 44 24 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x4"
+            ],
+            [
+              "0x4",
+              "0x5"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x20",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_index_excluded",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 44 88 10 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x4"
+            ],
+            [
+              "0x4",
+              "0x5"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": []
+      }
+    },
+    {
+      "id": "insn_index_explicit",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read index=any disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 44 88 10 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x4"
+            ],
+            [
+              "0x4",
+              "0x5"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x10",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_operand_address",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp_addr(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 F8 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x3"
+            ],
+            [
+              "0x3",
+              "0x4"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x2",
+            "kind": "CursorAddress",
+            "space": "image"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_conditional_write",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"write size=4 disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "0F B1 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x4"
+            ],
+            [
+              "0x4",
+              "0x5"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x20",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_64_byte_access",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read size=64 disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "62 F1 7C 48 10 41 01 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x8"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x7"
+            ],
+            [
+              "0x7",
+              "0x8"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": [
+          {
+            "value": "0x40",
+            "kind": "DisplacementValue",
+            "space": "scalar"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insn_bad_metadata",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0x2"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "execution_error",
+        "code": "InvalidInstructionMetadata"
+      }
+    },
+    {
+      "id": "insn_missing_metadata",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "status": "execution_error",
+        "code": "MissingMetadata"
+      }
+    },
+    {
+      "id": "insn_mid_instruction_anchor",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"8B 41 20\") -> insn(\"read disp(d)\", within=0) -> capture(\"d\")",
+        "image": {
+          "bytes": "48 B8 8B 41 20 00 00 00 00 00 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0xb"
+                ]
+              ]
+            }
+          ],
+          "instructions": [
+            [
+              "0x0",
+              "0xa"
+            ],
+            [
+              "0xa",
+              "0xb"
+            ]
+          ]
+        }
+      },
+      "expect": {
+        "status": "execution_error",
+        "code": "InvalidInstructionBoundary"
+      }
+    },
+    {
+      "id": "insn_linear_stops_on_failure",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read disp(d)\", decode=\"linear\") -> capture(\"d\")",
+        "image": {
+          "bytes": "06 8B 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "status": "ok",
+        "values": []
+      }
+    },
+    {
+      "id": "insn_duplicate_size",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read size=4 size=16 disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "status": "compile_error",
+        "code": "InvalidArgument"
+      }
+    },
+    {
+      "id": "insn_lea_size_rejected",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"lea size=4 disp(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "48 8D 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x5"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "status": "compile_error",
+        "code": "InvalidArgument"
+      }
+    },
+    {
+      "id": "insn_old_capture_rejected",
+      "request": {
+        "dialect": "maml-v1",
+        "operation": "pipeline",
+        "pipeline": "bytes(\"C3\") -> insn(\"read @(d)\") -> capture(\"d\")",
+        "image": {
+          "bytes": "8B 41 20 C3",
+          "base": "0x0",
+          "pointer_map": [],
+          "code": [],
+          "rodata": [],
+          "data": [],
+          "functions": [
+            {
+              "entry": "0x0",
+              "spans": [
+                [
+                  "0x0",
+                  "0x4"
+                ]
+              ]
+            }
+          ]
+        }
+      },
+      "expect": {
+        "status": "compile_error",
+        "code": "InvalidArgument"
+      }
     }
   ]
 }

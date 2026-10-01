@@ -10,7 +10,8 @@ version = "0.1.0"
 description = "Byte-pattern matching for binaries, with a seed-then-refine scanner"
 readme = "README.md"
 requires-python = ">=3.10"
-license = "BSL-1.0 OR MIT"
+license = "(BSL-1.0 OR MIT) AND MIT"
+license-files = ["LICENSE", "third_party/zydis/LICENSE", "third_party/zydis/dependencies/zycore/LICENSE"]
 
 [project.optional-dependencies]
 pe = ["lief>=0.14"]

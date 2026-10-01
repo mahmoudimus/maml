@@ -52,7 +52,7 @@ namespace {
         std::vector<generate::Range> code, rodata, instructions, data;
         uint64_t base = 0;
         bool has_base = false;
-        std::map<uint64_t,uint64_t> pointers;
+        std::map<uint64_t, uint64_t> pointers;
         std::vector<generate::Function> functions;
         std::string error;
     };
@@ -80,13 +80,20 @@ namespace {
             if (got == 2 && k == "size") {
                 m.size = a;
             } else if (got == 2 && k == "base") {
-                if (m.has_base && m.base != a) { m.error = "Conflicting base records"; return m; }
-                m.has_base = true; m.base = a;
+                if (m.has_base && m.base != a) {
+                    m.error = "Conflicting base records";
+                    return m;
+                }
+                m.has_base = true;
+                m.base = a;
             } else if (got == 3 && k == "pointer") {
-                auto [it, inserted] = m.pointers.emplace(a,b);
-                if (!inserted && it->second != b) { m.error = "Conflicting pointer mappings"; return m; }
+                auto [it, inserted] = m.pointers.emplace(a, b);
+                if (!inserted && it->second != b) {
+                    m.error = "Conflicting pointer mappings";
+                    return m;
+                }
             } else if (got == 3 && k == "data") {
-                m.data.push_back({a,b});
+                m.data.push_back({ a, b });
             } else if (got == 3 && k == "code") {
                 m.code.push_back({ a, b });
             } else if (got == 3 && k == "rodata") {
@@ -147,6 +154,7 @@ namespace {
             "\n"
             "stages: str(\"text\") | bytes(\"pattern\") | find(\"pattern\")\n"
             "        | before(\"pattern\", within=N) | after(\"pattern\", within=N)\n"
+            "        | insn(\"read size=4 disp(name)\"[, within=N][, decode=\"linear\"])\n"
             "        | capture(\"name\") | xrefs | callers | func | func:strict | func:loose\n"
             "        | ptrrefs | offset(N) | read_ptr | unique | nth(N) | limit(N) | read(N),  composed with ->\n"
             "manifest lines: size N | code A B | rodata A B | instruction A B | function ENTRY A B | data A B | base N | pointer RAW LOGICAL\n");
@@ -228,20 +236,31 @@ int main(int argc, char** argv) {
                 printf("%s\t", name.c_str());
             printf("%s %s=%zu", result.ok() ? "OK" : "NONE", result.is_matches ? "matches" : "values",
                 result.is_matches ? result.matches.size() : result.values.size());
+            auto print_value = [](const maml::v1::Value& value) {
+                const bool negative = value.is_signed() && value.as_signed() < 0;
+                const auto magnitude = negative ? uint64_t(0) - value.value : value.value;
+                printf("%s%llx:%s:%s", negative ? "-" : "", (unsigned long long)magnitude, value.kind.c_str(), value.space.c_str());
+            };
             for (const auto& match : result.matches) {
                 printf(" %llx", (unsigned long long)match.offset);
-                for (const auto& c : match.captures)
-                    printf("{%s=%llx:%s:%s}", c.name.c_str(), (unsigned long long)c.data.value, c.data.kind.c_str(), c.data.space.c_str());
+                for (const auto& c : match.captures) {
+                    printf("{%s=", c.name.c_str());
+                    print_value(c.data);
+                    printf("}");
+                }
             }
-            for (const auto& value : result.values)
-                printf(" %llx:%s:%s", (unsigned long long)value.value, value.kind.c_str(), value.space.c_str());
+            for (const auto& value : result.values) {
+                printf(" ");
+                print_value(value);
+            }
             printf("\n");
             if (trace)
                 for (const auto& t : result.trace) {
                     fprintf(stderr, "%s %zu -> %zu\n", t.stage.c_str(), t.into, t.out);
                     if (t.pointer_stats) {
-                        fprintf(stderr, "  candidates=%zu mapped=%zu unmapped=%zu invalid=%zu output=%zu\n", t.candidates,t.mapped,t.unmapped,t.invalid,t.out);
-                        for (auto r : t.searched_ranges) fprintf(stderr, "  range=%llu..%llu\n", (unsigned long long)r.begin, (unsigned long long)r.end);
+                        fprintf(stderr, "  candidates=%zu mapped=%zu unmapped=%zu invalid=%zu output=%zu\n", t.candidates, t.mapped, t.unmapped, t.invalid, t.out);
+                        for (auto r : t.searched_ranges)
+                            fprintf(stderr, "  range=%llu..%llu\n", (unsigned long long)r.begin, (unsigned long long)r.end);
                     }
                 }
             return result.ok();
