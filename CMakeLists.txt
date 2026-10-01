@@ -44,6 +44,28 @@ target_include_directories(maml INTERFACE
 )
 target_compile_features(maml INTERFACE cxx_std_20)
 
+# ── Zydis: instruction-aware matching (the `insn` stage, decode.hpp) ──────
+# The engine is otherwise byte-scanning only; Zydis is what lets a pattern
+# match on decoded operand semantics. Required -- decode.hpp includes it.
+find_package(Zydis CONFIG REQUIRED)
+target_link_libraries(maml INTERFACE Zydis::Zydis)
+# Zydis's exported config lists its Zycore dependency by bare name ("Zycore"),
+# and a Homebrew prefix is not on the default linker search path, so -lZycore
+# fails to resolve. Pull in the real Zycore target when present, and add the
+# directory that holds libZydis (same dir as libZycore) to the link path.
+find_package(zycore CONFIG QUIET)
+if(TARGET Zycore::Zycore)
+    target_link_libraries(maml INTERFACE Zycore::Zycore)
+endif()
+get_target_property(_maml_zydis_loc Zydis::Zydis IMPORTED_LOCATION_RELEASE)
+if(NOT _maml_zydis_loc)
+    get_target_property(_maml_zydis_loc Zydis::Zydis IMPORTED_LOCATION)
+endif()
+if(_maml_zydis_loc)
+    get_filename_component(_maml_zydis_dir "${_maml_zydis_loc}" DIRECTORY)
+    target_link_directories(maml INTERFACE $<BUILD_INTERFACE:${_maml_zydis_dir}>)
+endif()
+
 # ── mamlscan: the CLI ────────────────────────────────────────────────────
 # Scans an image for a pattern, or runs a whole jobfile against several
 # images with one load each. This is what drives the dual-build audit.

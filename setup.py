@@ -17,6 +17,25 @@ from setuptools import Extension, setup
 ROOT = pathlib.Path(__file__).parent
 DEBUG = os.environ.get("DEBUG", "0") == "1"
 
+# Zydis backs the instruction-aware `insn` stage (include/maml/decode.hpp), so
+# the extension is no longer header-only -- it links libZydis. Honor a brew/
+# custom prefix; default to Homebrew's arm64 location.
+ZYDIS_PREFIX = os.environ.get("ZYDIS_PREFIX") or os.environ.get("HOMEBREW_PREFIX") or "/opt/homebrew"
+
+
+def zydis_include() -> list[str]:
+    return [os.path.join(ZYDIS_PREFIX, "include")]
+
+
+def zydis_link() -> dict:
+    libdir = os.path.join(ZYDIS_PREFIX, "lib")
+    cfg = {"library_dirs": [libdir], "libraries": ["Zydis"]}
+    if platform.system() == "Darwin":
+        cfg["extra_link_args"] = ["-Wl,-rpath," + libdir]
+    else:
+        cfg["runtime_library_dirs"] = [libdir]
+    return cfg
+
 
 def compile_args() -> list[str]:
     if platform.system() == "Windows":
@@ -46,9 +65,10 @@ setup(
             "maml._core",
             ["python/maml/_core.pyx"],
             language="c++",
-            include_dirs=[str(ROOT / "include")],
+            include_dirs=[str(ROOT / "include"), *zydis_include()],
             extra_compile_args=compile_args(),
             define_macros=macros(),
+            **zydis_link(),
         ),
         compiler_directives={
             "language_level": "3",

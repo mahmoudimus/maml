@@ -214,3 +214,41 @@ TEST_CASE("absolute pointer table traversal uses explicit address mappings", "[v
     REQUIRE_THROWS_AS(query.run(image,{},rodata,functions,{},data), v1::Error);
     REQUIRE_THROWS_AS(v1::Pipeline("str(\"PitchUpStart\") -> offset(-17)").run(image,{},rodata), v1::Error);
 }
+
+TEST_CASE("v1 insn stage matches by access size and captures displacement", "[v1][pipeline][insn]") {
+    using namespace maml::v1;
+    // movups xmm0,[rcx+0x228]  (16-byte read)
+    // movss  xmm0,[rcx+0x111]  (4-byte read)
+    // ret
+    const std::vector<uint8_t> bytes{
+        0x0F, 0x10, 0x81, 0x28, 0x02, 0x00, 0x00,        // movups xmm0, [rcx+0x228]
+        0xF3, 0x0F, 0x10, 0x81, 0x11, 0x01, 0x00, 0x00,  // movss  xmm0, [rcx+0x111]
+        0xC3                                             // ret   (offset 15)
+    };
+    const Image image{ bytes };
+    const std::array<maml::generate::Function, 1> functions{ { { 0, { { 0, bytes.size() } } } } };
+
+    // A 16-byte memory read resolves to the movups displacement, not the movss.
+    auto r16 = Pipeline("bytes(\"C3\") -> func -> insn(\"read size=16 @(d)\") -> capture(\"d\") -> unique")
+                   .run(image, {}, {}, functions);
+    REQUIRE(r16.ok());
+    REQUIRE(r16.values.size() == 1);
+    REQUIRE(r16.values[0].value == 0x228);
+
+    // A 4-byte memory read resolves to the movss displacement instead.
+    auto r4 = Pipeline("bytes(\"C3\") -> func -> insn(\"read size=4 @(d)\") -> capture(\"d\") -> unique")
+                  .run(image, {}, {}, functions);
+    REQUIRE(r4.ok());
+    REQUIRE(r4.values[0].value == 0x111);
+
+    // The size filter is strict: neither read is a 2-byte access.
+    auto r2 = Pipeline("bytes(\"C3\") -> func -> insn(\"read size=2 @(d)\")").run(image, {}, {}, functions);
+    REQUIRE(!r2.ok());
+
+    // Without a size constraint both reads match -- two distinct displacements.
+    auto any = Pipeline("bytes(\"C3\") -> func -> insn(\"read @(d)\") -> capture(\"d\")").run(image, {}, {}, functions);
+    REQUIRE(any.values.size() == 2);
+
+    // A capture is mandatory; a sizeless/captureless spec is a parse error.
+    REQUIRE_THROWS_AS(Pipeline("bytes(\"C3\") -> func -> insn(\"read size=4\")"), maml::v1::Error);
+}

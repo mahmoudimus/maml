@@ -1,9 +1,57 @@
 // SPDX-License-Identifier: BSL-1.0 OR MIT
 #pragma once
+#include "decode.hpp"
 #include "generate.hpp"
 #include "v1.hpp"
 
 namespace maml::v1 {
+    // Constraints for the instruction-aware `insn` stage. Parsed from a small
+    // space-separated spec: an access keyword (read|write|lea|mem), an optional
+    // size=N (memory access width in bytes), and a required @(name) capture for
+    // the memory operand's displacement.
+    struct InsnSpec {
+        enum Access { Any, Read, Write, Lea } access = Any;
+        unsigned size = 0; // 0 = unconstrained
+        std::string capture;
+        static InsnSpec parse(std::string_view spec) {
+            InsnSpec out;
+            bool access_set = false, capture_set = false;
+            size_t p = 0;
+            auto ws = [&] { while (p < spec.size() && std::isspace((unsigned char)spec[p])) ++p; };
+            while (true) {
+                ws();
+                if (p >= spec.size()) break;
+                size_t begin = p;
+                while (p < spec.size() && !std::isspace((unsigned char)spec[p])) ++p;
+                std::string_view tok = spec.substr(begin, p - begin);
+                if (tok == "read" || tok == "write" || tok == "lea" || tok == "mem") {
+                    if (access_set) throw Error("InvalidArgument", "insn: duplicate access keyword");
+                    out.access = tok == "read" ? Read : tok == "write" ? Write : tok == "lea" ? Lea : Any;
+                    access_set = true;
+                } else if (tok.substr(0, 5) == "size=") {
+                    auto n = tok.substr(5);
+                    unsigned v = 0;
+                    auto r = std::from_chars(n.data(), n.data() + n.size(), v);
+                    if (r.ec != std::errc{} || r.ptr != n.data() + n.size())
+                        throw Error("InvalidArgument", "insn: size must be a decimal integer");
+                    if (v != 1 && v != 2 && v != 4 && v != 8 && v != 16 && v != 32)
+                        throw Error("InvalidArgument", "insn: size must be 1,2,4,8,16,32 bytes");
+                    out.size = v;
+                } else if (tok.size() >= 4 && tok.substr(0, 2) == "@(" && tok.back() == ')') {
+                    if (capture_set) throw Error("InvalidArgument", "insn: at most one @(name) capture");
+                    out.capture = std::string(tok.substr(2, tok.size() - 3));
+                    for (char c : out.capture)
+                        if (!(std::isalnum((unsigned char)c) || c == '_'))
+                            throw Error("InvalidArgument", "insn: capture name must be [A-Za-z0-9_]");
+                    if (out.capture.empty()) throw Error("InvalidArgument", "insn: empty capture name");
+                    capture_set = true;
+                } else
+                    throw Error("InvalidArgument", "insn: unknown token '" + std::string(tok) + "'");
+            }
+            if (!capture_set) throw Error("InvalidArgument", "insn requires a @(name) displacement capture");
+            return out;
+        }
+    };
     struct Trace {
         std::string stage;
         size_t into = 0;
@@ -28,6 +76,7 @@ namespace maml::v1 {
             uint64_t number = 0;
             int64_t displacement = 0;
             std::optional<Pattern> pattern;
+            std::optional<InsnSpec> insn;
         };
         std::vector<Stage> stages_;
         static bool in(std::span<const maml::generate::Range> ranges, uint64_t a) {
@@ -61,7 +110,7 @@ namespace maml::v1 {
                 Stage s;
                 s.name = std::string(source.substr(begin, p - begin));
                 const bool directional = s.name == "before" || s.name == "after";
-                const bool text = directional || s.name == "str" || s.name == "bytes" || s.name == "find" || s.name == "capture";
+                const bool text = directional || s.name == "str" || s.name == "bytes" || s.name == "find" || s.name == "capture" || s.name == "insn";
                 const bool numeric = s.name == "nth" || s.name == "limit" || s.name == "read" || s.name == "offset";
                 if (text || numeric) {
                     need('(');
@@ -173,6 +222,10 @@ namespace maml::v1 {
                 if (s.name == "bytes" || s.name == "find" || directional) {
                     s.pattern.emplace(s.argument);
                     schema = s.pattern->schema();
+                    matches = true;
+                } else if (s.name == "insn") {
+                    s.insn = InsnSpec::parse(s.argument);
+                    schema = { s.insn->capture };
                     matches = true;
                 } else if (s.name == "capture") {
                     if (!matches)
@@ -409,6 +462,45 @@ namespace maml::v1 {
                         });
                         r.is_matches = true;
                         r.schema = s.pattern->schema();
+                    } else if (s.name == "insn") {
+                        if (functions.empty())
+                            throw Error("MissingMetadata", "insn requires function metadata");
+                        const auto& spec = *s.insn;
+                        std::set<std::pair<uint64_t, uint64_t>> scopes;
+                        for (auto at : inputs)
+                            if (auto f = maml::generate::enclosing_function(indexed, at))
+                                for (auto span : f->spans)
+                                    scopes.insert({ span.begin, span.end });
+                        for (auto [lo, hi] : scopes) {
+                            const uint64_t end = std::min<uint64_t>(hi, image.bytes.size());
+                            uint64_t at = lo;
+                            while (at < end) {
+                                auto di = maml::decode::decode_one(image.bytes.data() + size_t(at), size_t(end - at));
+                                if (!di || di->length == 0) { ++at; continue; } // resync past a bad byte
+                                const auto& m = di->mem;
+                                bool ok = m.present && m.base_is_gpr && !m.base_is_rip && m.has_displacement;
+                                if (ok) switch (spec.access) {
+                                    case InsnSpec::Read: ok = m.reads && !di->is_lea; break;
+                                    case InsnSpec::Write: ok = m.writes; break;
+                                    case InsnSpec::Lea: ok = di->is_lea; break;
+                                    case InsnSpec::Any: ok = !di->is_lea; break;
+                                }
+                                if (ok && spec.size && spec.access != InsnSpec::Lea)
+                                    ok = m.size_bytes == spec.size;
+                                if (ok) {
+                                    Match hit{ at, { spec.capture }, {} };
+                                    hit.captures.push_back({ spec.capture,
+                                        Value{ uint64_t(m.displacement), "DisplacementValue", "scalar" } });
+                                    r.matches.push_back(std::move(hit));
+                                }
+                                at += di->length;
+                            }
+                        }
+                        std::sort(r.matches.begin(), r.matches.end(), [](const Match& a, const Match& b) {
+                            return a.offset < b.offset;
+                        });
+                        r.is_matches = true;
+                        r.schema = { spec.capture };
                     } else if (s.name == "func") {
                         if (functions.empty())
                             throw Error("MissingMetadata", "func requires function metadata");
@@ -529,6 +621,9 @@ namespace maml::v1 {
         }
         PipelineBuilder find(std::string_view text) const {
             return append("find(" + quote(text) + ")");
+        }
+        PipelineBuilder insn(std::string_view spec) const {
+            return append("insn(" + quote(spec) + ")");
         }
         PipelineBuilder before(std::string_view pattern, uint64_t within) const {
             return append("before(" + quote(pattern) + ", within=" + std::to_string(within) + ")");
