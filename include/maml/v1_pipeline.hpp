@@ -267,8 +267,11 @@ namespace maml::v1 {
                 trace.stage = s.name + (s.modifier.empty() ? "" : ":" + s.modifier);
                 trace.into = before;
                 if (s.name == "unique") {
-                    if (count() != 1)
-                        throw Error("Cardinality", "unique requires exactly one element");
+                    const size_t observed = count();
+                    if (observed != 1)
+                        throw Error(
+                            "Cardinality",
+                            "unique requires exactly one element (found " + std::to_string(observed) + ")");
                 } else if (s.name == "nth" || s.name == "limit") {
                     auto select = [&](auto& items) {
                         if (s.name == "limit") {

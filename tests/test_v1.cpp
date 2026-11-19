@@ -3,6 +3,27 @@
 #include <maml/v1_generate.hpp>
 #include <maml/v1_pipeline.hpp>
 #include <random>
+#include <string>
+
+TEST_CASE("v1 unique cardinality failures report the observed count", "[v1][pipeline]") {
+    const std::array<uint8_t, 2> bytes{ 0xAA, 0xAA };
+    const maml::v1::Image image{ bytes };
+    const auto error_message = [&](const std::string& source) {
+        try {
+            (void)maml::v1::Pipeline(source).run(image);
+        } catch (const maml::v1::Error& error) {
+            REQUIRE(error.code == "Cardinality");
+            return std::string(error.what());
+        }
+        FAIL("unique should reject a result count other than one");
+        return std::string{};
+    };
+
+    REQUIRE(error_message("bytes(\"BB\") -> unique") ==
+            "unique requires exactly one element (found 0)");
+    REQUIRE(error_message("bytes(\"AA\") -> unique") ==
+            "unique requires exactly one element (found 2)");
+}
 
 TEST_CASE("v1 preserves reference values and continuation", "[v1]") {
     const std::array<uint8_t, 7> bytes{ 0xE8, 1, 0, 0, 0, 0x90, 0xCC };

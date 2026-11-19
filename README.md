@@ -1193,8 +1193,9 @@ value, kind, and address space of present captures. It MUST NOT implicitly map
 absolute pointers.
 
 `unique` asserts exactly one element at its stage. Zero or several elements
-are errors; it never means taking the first. After `find`, it counts match
-records. After projection and deduplication, it counts distinct capture values.
+are errors; its cardinality error reports the observed count, and it never
+means taking the first. After `find`, it counts match records. After projection
+and deduplication, it counts distinct capture values.
 Distinctness includes kind and address space, not just equal integer bits.
 Thus two call sites sharing a target fail `find(...) -> unique` but can satisfy
 `find(...) -> capture("callee") -> unique`.
